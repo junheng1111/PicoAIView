@@ -291,3 +291,116 @@ def _load_cube(path: str):
         return arr
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# 主题滤镜（category="theme"）—— 持续背景色彩风格，编排中作为全曲基底
+# ---------------------------------------------------------------------------
+
+@register_fx(
+    fx_id="theme_warm",
+    category="theme",
+    latency_tier="light",
+    params={"strength": [0.0, 1.0]},
+    description="暖色调主题：金橙色调，RnB/流行适用",
+)
+def apply_theme_warm(frame: np.ndarray, strength: float = 0.6, **_) -> np.ndarray:
+    strength = max(0.0, min(1.0, strength))
+    # 蓝通道压低，红/绿通道微提
+    lut_r = np.clip(np.arange(256) * (1.0 + 0.12 * strength), 0, 255).astype(np.uint8)
+    lut_g = np.clip(np.arange(256) * (1.0 + 0.04 * strength), 0, 255).astype(np.uint8)
+    lut_b = np.clip(np.arange(256) * (1.0 - 0.18 * strength), 0, 255).astype(np.uint8)
+    b, g, r = cv2.split(frame)
+    return cv2.merge([cv2.LUT(b, lut_b), cv2.LUT(g, lut_g), cv2.LUT(r, lut_r)])
+
+
+@register_fx(
+    fx_id="theme_cool",
+    category="theme",
+    latency_tier="light",
+    params={"strength": [0.0, 1.0]},
+    description="冷色调主题：青蓝色调，EDM/电子适用",
+)
+def apply_theme_cool(frame: np.ndarray, strength: float = 0.6, **_) -> np.ndarray:
+    strength = max(0.0, min(1.0, strength))
+    lut_r = np.clip(np.arange(256) * (1.0 - 0.15 * strength), 0, 255).astype(np.uint8)
+    lut_g = np.clip(np.arange(256) * (1.0 + 0.03 * strength), 0, 255).astype(np.uint8)
+    lut_b = np.clip(np.arange(256) * (1.0 + 0.20 * strength), 0, 255).astype(np.uint8)
+    b, g, r = cv2.split(frame)
+    return cv2.merge([cv2.LUT(b, lut_b), cv2.LUT(g, lut_g), cv2.LUT(r, lut_r)])
+
+
+@register_fx(
+    fx_id="theme_vintage",
+    category="theme",
+    latency_tier="light",
+    params={"strength": [0.0, 1.0]},
+    description="复古胶片主题：褪色+暖黄+暗角，民谣/indie 适用",
+)
+def apply_theme_vintage(frame: np.ndarray, strength: float = 0.7, **_) -> np.ndarray:
+    strength = max(0.0, min(1.0, strength))
+    # 饱和度降低 + 暖黄偏移
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV).astype(np.float32)
+    hsv[..., 1] *= (1.0 - 0.35 * strength)   # 降饱和
+    hsv[..., 2] = np.clip(hsv[..., 2] * (1.0 - 0.05 * strength) + 8 * strength, 0, 255)
+    bgr = cv2.cvtColor(np.clip(hsv, 0, 255).astype(np.uint8), cv2.COLOR_HSV2BGR)
+    # 暖黄叠加
+    warm = np.full_like(bgr, (30, 60, 90), dtype=np.uint8)  # BGR: 橙黄
+    bgr = cv2.addWeighted(bgr, 1.0, warm, 0.08 * strength, 0)
+    # 轻暗角
+    h, w = bgr.shape[:2]
+    Y, X = np.mgrid[0:h, 0:w]
+    dist = np.sqrt(((X - w/2) / (w/2))**2 + ((Y - h/2) / (h/2))**2)
+    vig = 1.0 - np.clip((dist - 0.6) / 0.5, 0.0, 1.0) * 0.4 * strength
+    return np.clip(bgr.astype(np.float32) * vig[..., np.newaxis], 0, 255).astype(np.uint8)
+
+
+@register_fx(
+    fx_id="theme_neon",
+    category="theme",
+    latency_tier="light",
+    params={"strength": [0.0, 1.0]},
+    description="霓虹赛博主题：高饱和+深暗+洋红/青，电子/夜店适用",
+)
+def apply_theme_neon(frame: np.ndarray, strength: float = 0.7, **_) -> np.ndarray:
+    strength = max(0.0, min(1.0, strength))
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV).astype(np.float32)
+    hsv[..., 1] = np.clip(hsv[..., 1] * (1.0 + 0.6 * strength), 0, 255)   # 超饱和
+    hsv[..., 2] = np.clip(hsv[..., 2] * (1.0 - 0.25 * strength), 0, 255)  # 压暗背景
+    bgr = cv2.cvtColor(np.clip(hsv, 0, 255).astype(np.uint8), cv2.COLOR_HSV2BGR)
+    # 青色/洋红叠加
+    tint = np.zeros_like(bgr, dtype=np.float32)
+    tint[..., 0] = 40 * strength   # B channel boost
+    tint[..., 2] = 20 * strength   # R channel boost
+    return np.clip(bgr.astype(np.float32) + tint, 0, 255).astype(np.uint8)
+
+
+@register_fx(
+    fx_id="theme_cinematic",
+    category="theme",
+    latency_tier="light",
+    params={"strength": [0.0, 1.0]},
+    description="电影感主题：teal-orange + 裁黑边暗角，商业MV适用",
+)
+def apply_theme_cinematic(frame: np.ndarray, strength: float = 0.6, **_) -> np.ndarray:
+    strength = max(0.0, min(1.0, strength))
+    # Teal (阴影) + Orange (高光) 经典电影色调
+    f32 = frame.astype(np.float32)
+    lum = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+    # 阴影偏青：蓝绿微提，红压低
+    shadow_mask = (1.0 - lum)[..., np.newaxis]
+    f32[..., 0] += 12 * strength * shadow_mask[..., 0]   # B
+    f32[..., 1] += 8  * strength * shadow_mask[..., 0]   # G
+    f32[..., 2] -= 15 * strength * shadow_mask[..., 0]   # R
+    # 高光偏橙：红微提，蓝压低
+    high_mask = lum[..., np.newaxis]
+    f32[..., 0] -= 10 * strength * high_mask[..., 0]
+    f32[..., 2] += 14 * strength * high_mask[..., 0]
+    # 暗角
+    h, w = frame.shape[:2]
+    Y, X = np.mgrid[0:h, 0:w]
+    dist = np.sqrt(((X - w/2) / (w/2))**2 + ((Y - h/2) / (h/2))**2)
+    vig = 1.0 - np.clip((dist - 0.55) / 0.5, 0.0, 1.0) * 0.5 * strength
+    f32 *= vig[..., np.newaxis]
+    return np.clip(f32, 0, 255).astype(np.uint8)
+

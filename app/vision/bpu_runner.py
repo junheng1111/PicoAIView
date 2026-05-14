@@ -152,49 +152,137 @@ class _BpuModel:
 
 
 # ---------------------------------------------------------------------------
-# 检测解析（YOLOv8 with on-chip NMS）
+# YOLOv8 原始 6-head 后处理（无 on-chip NMS）
 # ---------------------------------------------------------------------------
 
+_COCO_NAMES: List[str] = [
+    "person","bicycle","car","motorcycle","airplane","bus","train","truck","boat",
+    "traffic light","fire hydrant","stop sign","parking meter","bench","bird","cat",
+    "dog","horse","sheep","cow","elephant","bear","zebra","giraffe","backpack",
+    "umbrella","handbag","tie","suitcase","frisbee","skis","snowboard","sports ball",
+    "kite","baseball bat","baseball glove","skateboard","surfboard","tennis racket",
+    "bottle","wine glass","cup","fork","knife","spoon","bowl","banana","apple",
+    "sandwich","orange","broccoli","carrot","hot dog","pizza","donut","cake","chair",
+    "couch","potted plant","bed","dining table","toilet","tv","laptop","mouse",
+    "remote","keyboard","cell phone","microwave","oven","toaster","sink","refrigerator",
+    "book","clock","vase","scissors","teddy bear","hair drier","toothbrush",
+]
+
+
+def _dfl_decode(box_dfl: np.ndarray) -> np.ndarray:
+    """DFL 分布 → ltrb 距离（格子单位）。box_dfl: (N, 64) → (N, 4)。"""
+    x = box_dfl.reshape(-1, 4, 16)
+    x = x - x.max(axis=-1, keepdims=True)
+    e = np.exp(x)
+    s = e / e.sum(axis=-1, keepdims=True)
+    return (s * np.arange(16, dtype=np.float32)).sum(axis=-1)
+
+
+def _nms_cpu(boxes: np.ndarray, scores: np.ndarray, iou_th: float) -> List[int]:
+    x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+    areas = (x2 - x1).clip(0) * (y2 - y1).clip(0)
+    order = scores.argsort()[::-1]
+    keep: List[int] = []
+    while order.size:
+        i = order[0]
+        keep.append(int(i))
+        if order.size == 1:
+            break
+        xx1 = x1[order[1:]].clip(min=x1[i])
+        yy1 = y1[order[1:]].clip(min=y1[i])
+        xx2 = x2[order[1:]].clip(max=x2[i])
+        yy2 = y2[order[1:]].clip(max=y2[i])
+        inter = (xx2 - xx1).clip(0) * (yy2 - yy1).clip(0)
+        iou   = inter / (areas[i] + areas[order[1:]] - inter + 1e-9)
+        order = order[1:][iou < iou_th]
+    return keep
+
+
 def _parse_detections(
-    outputs, conf_th: float = 0.25, only_person: bool = False
+    outputs, conf_th: float = 0.25, only_person: bool = False,
+    iou_th: float = 0.45, input_hw: Tuple[int, int] = (640, 640),
 ) -> List[Detection]:
-    """解析 BPU 推理输出。
+    """解析 YOLOv8 原始 6-head 输出（无 on-chip NMS）。
 
-    预期格式：outputs[0].buffer shape = [1, num_det, 6]
-    每行 [x1, y1, x2, y2, score, class_id]，坐标归一化 0-1。
+    outputs[0/2/4]: (1, H, W, 80) 类别 logits  (P3/P4/P5)
+    outputs[1/3/5]: (1, H, W, 64) DFL box       (P3/P4/P5)
     """
-    if outputs is None:
+    if outputs is None or len(outputs) < 6:
         return []
 
-    buf = np.array(outputs[0].buffer).squeeze()
-    if buf.ndim == 1:
-        buf = buf[np.newaxis, :]
-    if buf.ndim != 2 or buf.shape[1] < 6:
+    ih, iw = input_hw
+    all_boxes:  List[np.ndarray] = []
+    all_scores: List[np.ndarray] = []
+    all_cls:    List[np.ndarray] = []
+
+    for ci, bi in ((0, 1), (2, 3), (4, 5)):
+        cls_buf = np.array(outputs[ci].buffer).squeeze()  # (H, W, 80)
+        box_buf = np.array(outputs[bi].buffer).squeeze()  # (H, W, 64)
+        if cls_buf.ndim != 3 or box_buf.ndim != 3:
+            continue
+
+        H, W = cls_buf.shape[:2]
+        stride = iw // W   # 8 / 16 / 32
+
+        cls_prob  = 1.0 / (1.0 + np.exp(-np.clip(cls_buf.reshape(-1, 80), -20, 20)))
+        max_score = cls_prob.max(axis=1)
+        mask = max_score > conf_th
+        if not mask.any():
+            continue
+
+        cls_ids = cls_prob.argmax(axis=1)[mask]
+        scores  = max_score[mask]
+
+        if only_person:
+            p_mask  = cls_ids == COCO_PERSON_CLASS_ID
+            cls_ids = cls_ids[p_mask]
+            scores  = scores[p_mask]
+            mask_idx = np.where(mask)[0][p_mask]
+        else:
+            mask_idx = np.where(mask)[0]
+
+        if scores.size == 0:
+            continue
+
+        ltrb = _dfl_decode(box_buf.reshape(-1, 64)[mask_idx]) * stride
+
+        ys, xs = np.meshgrid(np.arange(H), np.arange(W), indexing='ij')
+        cx = ((xs.reshape(-1) + 0.5) * stride)[mask_idx]
+        cy = ((ys.reshape(-1) + 0.5) * stride)[mask_idx]
+
+        x1 = np.clip((cx - ltrb[:, 0]) / iw, 0.0, 1.0)
+        y1 = np.clip((cy - ltrb[:, 1]) / ih, 0.0, 1.0)
+        x2 = np.clip((cx + ltrb[:, 2]) / iw, 0.0, 1.0)
+        y2 = np.clip((cy + ltrb[:, 3]) / ih, 0.0, 1.0)
+
+        all_boxes.append(np.stack([x1, y1, x2, y2], axis=1))
+        all_scores.append(scores)
+        all_cls.append(cls_ids)
+
+    if not all_boxes:
         return []
+
+    boxes  = np.concatenate(all_boxes,  axis=0)
+    scores = np.concatenate(all_scores, axis=0)
+    cls_id = np.concatenate(all_cls,    axis=0)
 
     dets: List[Detection] = []
-    for row in buf:
-        x1, y1, x2, y2, score, cls = (
-            float(row[0]), float(row[1]), float(row[2]),
-            float(row[3]), float(row[4]), int(row[5])
-        )
-        if score < conf_th:
-            continue
-        if only_person and cls != COCO_PERSON_CLASS_ID:
-            continue
-
-        x1 = max(0.0, min(1.0, x1))
-        y1 = max(0.0, min(1.0, y1))
-        x2 = max(0.0, min(1.0, x2))
-        y2 = max(0.0, min(1.0, y2))
-        w = x2 - x1
-        h_box = y2 - y1
-        if w <= 0 or h_box <= 0:
-            continue
-
-        label = "person" if cls == COCO_PERSON_CLASS_ID else f"class_{cls}"
-        dets.append(Detection(label=label, confidence=score,
-                               bbox=(x1, y1, w, h_box), class_id=cls))
+    for c in np.unique(cls_id):
+        idx  = np.where(cls_id == c)[0]
+        keep = _nms_cpu(boxes[idx], scores[idx], iou_th)
+        for k in keep:
+            i    = idx[k]
+            x1, y1, x2, y2 = boxes[i]
+            w_box = float(x2 - x1)
+            h_box = float(y2 - y1)
+            if w_box <= 0 or h_box <= 0:
+                continue
+            label = _COCO_NAMES[c] if c < len(_COCO_NAMES) else f"class_{c}"
+            dets.append(Detection(
+                label=label, confidence=float(scores[i]),
+                bbox=(float(x1), float(y1), w_box, h_box),
+                class_id=int(c),
+            ))
 
     return sorted(dets, key=lambda d: -d.confidence)
 

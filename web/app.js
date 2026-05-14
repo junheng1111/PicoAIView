@@ -3,12 +3,15 @@ let currentMusicId = null;
 let wsConnection   = null;
 let _taskPollTimer = null;
 let _choreoTaskId  = null;
+let _activeTheme   = '';
 
 // ── 初始化 ──────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
     setupEventListeners();
     connectWebSocket();
     checkSystemStatus();
+    loadMusicLibrary();
+    loadThemeCatalog();
     setInterval(checkSystemStatus, 5000);
 
     // 音频时间更新（本地时钟显示 + 向服务端同步）
@@ -26,6 +29,13 @@ document.addEventListener('DOMContentLoaded', () => {
             }));
         }
     }, 200);
+
+    // 主题强度滑块标签同步
+    const slider = document.getElementById('themeStrength');
+    slider.addEventListener('input', () => {
+        document.getElementById('themeStrengthVal').textContent =
+            slider.value + '%';
+    });
 });
 
 function setupEventListeners() {
@@ -60,6 +70,119 @@ function setBadge(id, text, ok) {
 function handleStreamError(img) {
     // 服务器还没就绪时，1s 后重连
     setTimeout(() => { img.src = '/api/video/stream?' + Date.now(); }, 1000);
+}
+
+// ── 音乐库 ──────────────────────────────────────────────────────────
+async function loadMusicLibrary() {
+    const hint = document.getElementById('libraryHint');
+    try {
+        const data = await fetchJSON('/api/music/library');
+        const sel  = document.getElementById('musicLibrarySelect');
+        // 保留第一个空选项
+        while (sel.options.length > 1) sel.remove(1);
+        if (!data.items || data.items.length === 0) {
+            hint.textContent = '库中暂无音乐';
+            return;
+        }
+        for (const item of data.items) {
+            const bpm   = item.tempo ? ` ${Math.round(item.tempo)} BPM` : '';
+            const dur   = item.duration ? ` ${item.duration.toFixed(0)}s` : '';
+            const flag  = item.has_choreo ? ' ✓' : '';
+            const label = `${item.filename}${bpm}${dur}${flag}`;
+            const opt   = new Option(label, item.music_id);
+            opt.dataset.hasChoreo = item.has_choreo ? '1' : '';
+            opt.dataset.status    = item.status || '';
+            sel.add(opt);
+        }
+        hint.textContent = `共 ${data.items.length} 首（✓ 已有编排）`;
+    } catch (e) {
+        hint.textContent = '加载失败';
+        console.warn('loadMusicLibrary:', e);
+    }
+}
+
+async function onLibrarySelect(musicId) {
+    if (!musicId) return;
+    currentMusicId = musicId;
+
+    // 清理旧状态
+    document.getElementById('choreoSummary').style.display = 'none';
+    document.getElementById('taskSection').style.display   = 'none';
+    document.getElementById('uploadProgress').classList.add('hidden');
+
+    try {
+        const info = await fetchJSON(`/api/music/${musicId}`);
+        document.getElementById('fileInfo').classList.remove('hidden');
+        document.getElementById('fileName').textContent =
+            info.filename || musicId;
+        document.getElementById('fileDuration').textContent =
+            info.duration ? info.duration.toFixed(1) + 's' : '-';
+        document.getElementById('beatInfo').textContent =
+            info.tempo ? info.tempo.toFixed(0) + ' BPM' : '-';
+
+        // 按状态决定哪些按钮可用
+        const analyzed = info.status === 'analyzed';
+        document.getElementById('analyzeBtn').disabled  = false;
+        document.getElementById('choreBtn').disabled    = !analyzed;
+        document.getElementById('previewBtn').disabled  = true;
+
+        // 尝试加载编排
+        try {
+            const choreo = await fetchJSON(`/api/music/${musicId}/choreo`);
+            showChoreoResult(choreo);
+            document.getElementById('previewBtn').disabled = false;
+            // 自动切换到编排中记录的主题
+            if (choreo.theme) {
+                document.getElementById('themeSelect').value = choreo.theme;
+                _activeTheme = choreo.theme;
+                updateThemeBadge(choreo.theme);
+            }
+        } catch {
+            // 无编排——正常，不报错
+        }
+    } catch (e) {
+        showTask('❌ 加载音乐信息失败: ' + e.message);
+    }
+}
+
+// ── 主题滤镜 ────────────────────────────────────────────────────────
+async function loadThemeCatalog() {
+    try {
+        const data = await fetchJSON('/api/fx/themes');
+        const sel  = document.getElementById('themeSelect');
+        for (const t of (data.themes || [])) {
+            const label = t.description
+                ? `${t.id}  —  ${t.description}`
+                : t.id;
+            sel.add(new Option(label, t.id));
+        }
+    } catch (e) {
+        console.warn('loadThemeCatalog:', e);
+    }
+}
+
+async function applyTheme(themeId) {
+    const strength = parseInt(document.getElementById('themeStrength').value, 10) / 100;
+    document.getElementById('themeStrengthVal').textContent =
+        Math.round(strength * 100) + '%';
+    try {
+        await fetchJSON('/api/session/theme', 'POST',
+                        { theme_id: themeId || '', strength });
+        _activeTheme = themeId;
+        updateThemeBadge(themeId);
+    } catch (e) {
+        console.warn('applyTheme:', e);
+    }
+}
+
+function updateThemeBadge(themeId) {
+    const el = document.getElementById('themeActive');
+    if (themeId) {
+        el.classList.remove('hidden');
+        el.textContent = '主题: ' + themeId.replace('theme_', '');
+    } else {
+        el.classList.add('hidden');
+    }
 }
 
 // ── 文件选择 / 上传 ─────────────────────────────────────────────────
@@ -108,6 +231,8 @@ async function uploadMusicFile(file) {
                     document.getElementById('progressText').textContent = '✅ 上传完成';
                     document.getElementById('analyzeBtn').disabled = false;
                     console.log('上传成功, music_id:', currentMusicId);
+                    // 刷新音乐库列表
+                    loadMusicLibrary();
                 } else {
                     document.getElementById('progressText').textContent =
                         `❌ 上传失败 (HTTP ${xhr.status})`;
@@ -150,6 +275,7 @@ async function analyzMusic() {
         showTask(`✅ 分析完成  BPM: ${info.tempo ? info.tempo.toFixed(1) : '?'}  时长: ${info.duration ? info.duration.toFixed(1)+'s' : '?'}  节拍: ${info.beat_count}`);
         document.getElementById('beatInfo').textContent = info.tempo ? info.tempo.toFixed(0) + ' BPM' : '-';
         document.getElementById('choreBtn').disabled = false;
+        loadMusicLibrary();  // 刷新库（显示已分析状态）
     } catch (err) {
         showTask('❌ 分析失败: ' + err.message);
         document.getElementById('analyzeBtn').disabled = false;
@@ -172,6 +298,12 @@ async function generateChoreo() {
         showTask(`✅ 编排完成  来源: ${choreo.source}  事件: ${choreo.track_count}`);
         showChoreoResult(choreo);
         document.getElementById('previewBtn').disabled = false;
+        // 自动应用编排中的主题
+        if (choreo.theme) {
+            document.getElementById('themeSelect').value = choreo.theme;
+            await applyTheme(choreo.theme);
+        }
+        loadMusicLibrary();  // 刷新库（显示 ✓ 标记）
     } catch (err) {
         showTask('❌ 编排失败: ' + err.message);
         document.getElementById('choreBtn').disabled = false;
@@ -189,6 +321,7 @@ function showChoreoResult(choreo) {
         `风格: ${choreo.style || '-'}`,
         `事件数: ${choreo.track_count}`,
     ];
+    if (choreo.theme) lines.push(`主题: ${choreo.theme}`);
     if (plan.segments) lines.push(`段落: ${plan.segments.length}`);
     if (plan.mood)     lines.push(`情绪: ${plan.mood}`);
     info.innerHTML = lines.map(l => `<div>${l}</div>`).join('');
@@ -253,6 +386,12 @@ function reset() {
     document.getElementById('currentFx').textContent = '-';
     document.getElementById('audioTime').textContent = '0.0s';
     document.getElementById('fxActive').classList.add('hidden');
+    document.getElementById('themeActive').classList.add('hidden');
+    document.getElementById('musicLibrarySelect').value = '';
+    // 清除主题
+    document.getElementById('themeSelect').value = '';
+    _activeTheme = '';
+    applyTheme('');
 }
 
 // ── 任务轮询 ────────────────────────────────────────────────────────
@@ -299,6 +438,10 @@ function connectWebSocket() {
                 const fa = document.getElementById('fxActive');
                 fa.classList.remove('hidden');
                 fa.textContent = 'FX: ' + d.fx;
+            }
+            // 主题
+            if (d.theme !== undefined) {
+                updateThemeBadge(d.theme);
             }
             // 音频时间（若本地 audio 在播放则忽略服务端时钟，避免抖动）
             if (d.audio_t !== undefined) {

@@ -48,6 +48,14 @@ class FxCompositor:
         # 帧缓冲 ring（时间域特效用）
         self._last_ring_push: float = 0.0
 
+        # subject_zoom 视口（归一化：left, top, width, height），供 bbox 坐标变换使用
+        # (0, 0, 1, 1) 表示全帧，无缩放
+        self._viewport: tuple = (0.0, 0.0, 1.0, 1.0)
+
+        # 主题滤镜（持续背景层）：fx_id → params
+        self._active_theme: str = ""
+        self._theme_params: Dict[str, Any] = {}
+
     def load_track(self, track: List[Dict[str, Any]]) -> None:
         """加载 ChoreoTrack，分类为 beat events 和 continuous fx。"""
         self._beat_events = []
@@ -64,6 +72,15 @@ class FxCompositor:
 
     def set_vision_state(self, vs) -> None:
         self._vision_state = vs
+
+    def set_theme(self, theme_id: str, params: Optional[Dict[str, Any]] = None) -> None:
+        """设置持续背景主题滤镜。theme_id='' 清除主题。"""
+        self._active_theme = theme_id or ""
+        self._theme_params = params or {}
+
+    def get_viewport(self) -> tuple:
+        """返回当前 subject_zoom 视口 (left, top, w, h) 归一化坐标。"""
+        return self._viewport
 
     def override_fx(self, fx_id: str, params: Dict[str, Any]) -> None:
         self._manual_overrides[fx_id] = params
@@ -86,6 +103,14 @@ class FxCompositor:
 
         result = frame.copy()
         vs = self._vision_state
+
+        # 0. 主题滤镜（最底层，背景色彩风格）
+        if self._active_theme:
+            result = apply_fx(self._active_theme, result, vision_state=vs,
+                              t=audio_clock, **self._theme_params)
+
+        # 重置每帧视口（无 subject_zoom 时为全帧）
+        self._viewport = (0.0, 0.0, 1.0, 1.0)
 
         # 1. 持续型 FX（时间区间匹配）
         for entry in self._continuous_fx:
@@ -141,9 +166,23 @@ class FxCompositor:
         rms = self.current_rms
         result = frame
 
-        # a) subject_zoom：有人时把人放大（RMS 越大放大越多）
+        # a) subject_zoom：有人时把人放大，并记录视口供 bbox 坐标变换
         if vs and vs.subject_count > 0:
             zoom_amp = 0.05 + rms * 0.20   # 0.05 ~ 0.25 倍放大
+            # 计算 subject_zoom 视口（归一化）
+            ratio = 0.7  # 与 apply_subject_zoom 默认值一致
+            pb = vs.primary_bbox()
+            if pb:
+                cx = pb[0] + pb[2] / 2.0
+                cy = pb[1] + pb[3] / 2.0
+            else:
+                cx, cy = 0.5, 0.5
+            vl = max(0.0, cx - ratio / 2.0)
+            vt = max(0.0, cy - ratio / 2.0)
+            # 右/下边界超出时从左/上收缩（与 apply_subject_zoom 的 clamp 行为一致）
+            vl = min(vl, 1.0 - ratio)
+            vt = min(vt, 1.0 - ratio)
+            self._viewport = (vl, vt, ratio, ratio)
             result = apply_fx("subject_zoom", result, vision_state=vs,
                                t=audio_clock, amp=zoom_amp)
 

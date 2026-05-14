@@ -32,18 +32,30 @@ def _render_frame(frame: np.ndarray, compositor, t: float, vs) -> np.ndarray:
     except Exception:
         processed = proc
 
-    # 叠加 YOLO 检测框
+    # 叠加 YOLO 检测框（需通过 compositor 的 viewport 做坐标变换）
     if vs and vs.detections:
         ph, pw = processed.shape[:2]
+        # 获取 subject_zoom 视口（left_norm, top_norm, w_norm, h_norm）
+        vl, vt, vw, vh = compositor.get_viewport() if hasattr(compositor, 'get_viewport') else (0.0, 0.0, 1.0, 1.0)
         for det in vs.detections:
-            x, y, bw, bh = det.bbox
-            x1, y1 = int(x * pw), int(y * ph)
-            x2, y2 = int((x + bw) * pw), int((y + bh) * ph)
+            ox, oy, obw, obh = det.bbox  # 原始归一化坐标
+            # 将原始坐标变换到当前显示空间
+            dx  = (ox  - vl) / vw
+            dy  = (oy  - vt) / vh
+            dw  = obw / vw
+            dh  = obh / vh
+            x1, y1 = int(dx * pw),        int(dy * ph)
+            x2, y2 = int((dx + dw) * pw), int((dy + dh) * ph)
+            # 裁剪到帧边界
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(pw - 1, x2), min(ph - 1, y2)
+            if x2 <= x1 or y2 <= y1:
+                continue
             color = (0, 255, 64) if det.label == "person" else (0, 165, 255)
             cv2.rectangle(processed, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(processed, f"{det.label} {det.confidence:.2f}",
-                        (x1, max(y1 - 6, 14)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+            label_txt = f"{det.label} {det.confidence:.2f}"
+            cv2.putText(processed, label_txt, (x1, max(y1 - 6, 14)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
         if vs.subject_count > 0:
             cv2.putText(processed, f"Persons: {vs.subject_count}",
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 64), 2)
@@ -204,7 +216,8 @@ class Orchestrator:
                         if 0 <= idx < len(self.compositor._beat_events):
                             active_fx = self.compositor._beat_events[idx].get("fx", "")
                 await broadcast_status(fps, 0.0, self.current_audio_clock(),
-                                       bpu_stats, active_fx)
+                                       bpu_stats, active_fx,
+                                       self.compositor._active_theme if self.compositor else "")
             except Exception:
                 pass
 

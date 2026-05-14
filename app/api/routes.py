@@ -6,8 +6,8 @@ FastAPI REST 路由。§7.1。
 from __future__ import annotations
 
 import asyncio
+import json
 import os
-import tempfile
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -16,8 +16,8 @@ import urllib.parse
 
 import cv2
 import numpy as np
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from app.beat.analyzer import analyze as beat_analyze
@@ -27,15 +27,99 @@ from app.fx._registry import FX_REGISTRY
 
 router = APIRouter(prefix="/api")
 
-# 简单内存存储（生产替换为 Redis / SQLite）
+# 内存存储（与磁盘 JSON 双写同步）
 _music_store: Dict[str, Dict] = {}
 _choreo_store: Dict[str, Dict] = {}
 _task_store: Dict[str, str] = {}   # task_id → "running" | "done" | "error"
 
 UPLOAD_DIR = Path(os.getenv("PICOCLAW_UPLOAD_DIR", "/tmp/picoclaw_uploads"))
 CACHE_DIR  = Path(os.getenv("PICOCLAW_CACHE_DIR",  "/tmp/picoclaw_cache"))
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-CACHE_DIR.mkdir(parents=True, exist_ok=True)
+# 持久化目录：音乐元数据 + 编排 JSON
+DATA_DIR   = Path(os.getenv("PICOCLAW_DATA_DIR",   "/tmp/picoclaw_data"))
+CHOREO_DIR = DATA_DIR / "choreos"
+FEAT_DIR   = DATA_DIR / "feats"
+MUSIC_DB   = DATA_DIR / "music_library.json"
+
+for _d in (UPLOAD_DIR, CACHE_DIR, DATA_DIR, CHOREO_DIR, FEAT_DIR):
+    _d.mkdir(parents=True, exist_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# 持久化辅助
+# ---------------------------------------------------------------------------
+
+def _save_music_library() -> None:
+    """把音乐元数据（不含 feat 大数据）写入 music_library.json。"""
+    snapshot = {}
+    for mid, info in _music_store.items():
+        entry = {k: v for k, v in info.items() if k != "feat"}
+        snapshot[mid] = entry
+    tmp = MUSIC_DB.with_suffix(".json.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(snapshot, f, ensure_ascii=False, indent=2)
+    tmp.replace(MUSIC_DB)
+
+
+def _load_music_library() -> None:
+    """启动时从 music_library.json 恢复内存状态。"""
+    if not MUSIC_DB.exists():
+        return
+    try:
+        with open(MUSIC_DB, encoding="utf-8") as f:
+            data = json.load(f)
+        for mid, info in data.items():
+            if Path(info.get("path", "")).exists():
+                _music_store[mid] = info
+                # 尝试恢复 feat（beat 分析结果）
+                feat_path = FEAT_DIR / f"{mid}.json"
+                if feat_path.exists():
+                    try:
+                        with open(feat_path, encoding="utf-8") as ff:
+                            _music_store[mid]["feat"] = json.load(ff)
+                    except Exception:
+                        pass
+    except Exception as e:
+        print(f"[routes] 加载音乐库失败: {e}")
+
+
+def _save_feat(music_id: str, feat: Dict) -> None:
+    """把 beat 分析结果保存为 feats/<music_id>.json。"""
+    try:
+        feat_path = FEAT_DIR / f"{music_id}.json"
+        tmp = feat_path.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(feat, f, ensure_ascii=False)
+        tmp.replace(feat_path)
+    except Exception as e:
+        print(f"[routes] 保存 feat 失败: {e}")
+
+
+def _save_choreo(music_id: str, data: Dict) -> None:
+    """把编排保存为 choreos/<music_id>.json。"""
+    try:
+        path = CHOREO_DIR / f"{music_id}.json"
+        tmp = path.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        tmp.replace(path)
+    except Exception as e:
+        print(f"[routes] 保存编排失败: {e}")
+
+
+def _load_choreo_from_disk(music_id: str) -> Optional[Dict]:
+    """从磁盘加载编排（若内存无缓存时使用）。"""
+    path = CHOREO_DIR / f"{music_id}.json"
+    if path.exists():
+        try:
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return None
+
+
+# 启动时恢复
+_load_music_library()
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +146,7 @@ async def upload_music_raw(request: Request):
 
     _music_store[music_id] = {"path": str(dest), "filename": filename,
                                "status": "uploaded", "size": written}
+    _save_music_library()
     return {"music_id": music_id, "size": written}
 
 
@@ -101,6 +186,12 @@ async def analyze_music(music_id: str, background_tasks: BackgroundTasks):
             )
             _music_store[music_id]["feat"] = feat
             _music_store[music_id]["status"] = "analyzed"
+            # 持久化：feat 单独存储（大文件），库元数据内只存摘要
+            _save_feat(music_id, feat)
+            _music_store[music_id]["tempo"]      = feat.get("tempo")
+            _music_store[music_id]["duration"]   = feat.get("duration")
+            _music_store[music_id]["beat_count"] = len(feat.get("beats", []))
+            _save_music_library()
             _task_store[task_id] = "done"
         except Exception as e:
             import traceback
@@ -109,6 +200,26 @@ async def analyze_music(music_id: str, background_tasks: BackgroundTasks):
 
     background_tasks.add_task(_run)
     return {"task_id": task_id}
+
+
+@router.get("/music/library")
+async def list_music_library():
+    """返回所有已存储的音乐，供前端下拉框使用。"""
+    items = []
+    for mid, info in _music_store.items():
+        feat = info.get("feat", {})
+        has_choreo = (mid in _choreo_store
+                      or (CHOREO_DIR / f"{mid}.json").exists())
+        items.append({
+            "music_id": mid,
+            "filename": info.get("filename", ""),
+            "status": info.get("status", "uploaded"),
+            "tempo": info.get("tempo") or feat.get("tempo"),
+            "duration": info.get("duration") or feat.get("duration"),
+            "has_choreo": has_choreo,
+        })
+    items.sort(key=lambda x: x["filename"].lower())
+    return {"items": items}
 
 
 @router.get("/music/{music_id}")
@@ -122,8 +233,8 @@ async def get_music(music_id: str):
         "music_id": music_id,
         "filename": info.get("filename"),
         "status": info.get("status"),
-        "tempo": feat.get("tempo"),
-        "duration": feat.get("duration"),
+        "tempo": info.get("tempo") or feat.get("tempo"),
+        "duration": info.get("duration") or feat.get("duration"),
         "beat_count": len(feat.get("beats", [])),
         "segments": feat.get("segments", []),
         "rms_summary": feat.get("rms_summary", []),
@@ -162,12 +273,15 @@ async def trigger_ai_choreo(music_id: str, req: ChoreoAIRequest,
                 force_refresh=req.force_refresh,
                 model_override=req.model,
             )
-            _choreo_store[music_id] = {
+            choreo_data = {
                 "source": source,
                 "plan": plan.model_dump() if plan else None,
                 "track": track,
                 "style": req.style,
+                "theme": (plan.model_dump() or {}).get("theme", "") if plan else "",
             }
+            _choreo_store[music_id] = choreo_data
+            _save_choreo(music_id, choreo_data)   # 持久化
             _task_store[task_id] = "done"
         except Exception as e:
             _task_store[task_id] = f"error: {e}"
@@ -178,13 +292,17 @@ async def trigger_ai_choreo(music_id: str, req: ChoreoAIRequest,
 
 @router.get("/music/{music_id}/choreo")
 async def get_choreo(music_id: str):
-    """获取当前编排。"""
-    if music_id not in _choreo_store:
-        raise HTTPException(404, "choreo not found")
-    data = _choreo_store[music_id]
+    """获取当前编排（内存无则从磁盘加载）。"""
+    data = _choreo_store.get(music_id)
+    if not data:
+        data = _load_choreo_from_disk(music_id)
+        if not data:
+            raise HTTPException(404, "choreo not found")
+        _choreo_store[music_id] = data   # 内存缓存
     return {
         "source": data.get("source"),
         "style": data.get("style"),
+        "theme": data.get("theme", ""),
         "plan": data.get("plan"),
         "track_count": len(data.get("track", [])),
     }
@@ -192,9 +310,12 @@ async def get_choreo(music_id: str):
 
 @router.put("/music/{music_id}/choreo")
 async def put_choreo(music_id: str, body: Dict[str, Any]):
-    """上传自定义编排（source=manual）。"""
-    _choreo_store[music_id] = {"source": "manual", "track": body.get("track", []),
-                                "plan": body.get("plan")}
+    """上传自定义编排（source=manual）并持久化。"""
+    data = {"source": "manual", "track": body.get("track", []),
+            "plan": body.get("plan"), "theme": body.get("theme", ""),
+            "style": body.get("style", "")}
+    _choreo_store[music_id] = data
+    _save_choreo(music_id, data)
     return {"ok": True}
 
 
@@ -219,16 +340,25 @@ _active_session: Dict = {}
 
 @router.post("/session/start")
 async def session_start(req: SessionStartRequest):
-    """启动演出 session，通知 Orchestrator。"""
+    """启动演出 session，通知 Orchestrator并应用主题。"""
     from app.main import get_orchestrator
     orch = get_orchestrator()
     if orch:
-        choreo = _choreo_store.get(req.music_id, {})
+        # 内存无则尝试从磁盘加载编排
+        choreo = _choreo_store.get(req.music_id)
+        if not choreo:
+            choreo = _load_choreo_from_disk(req.music_id) or {}
+            if choreo:
+                _choreo_store[req.music_id] = choreo
         orch.load_session(
             music_id=req.music_id,
             track=choreo.get("track", []),
             feat=_music_store.get(req.music_id, {}).get("feat", {}),
         )
+        # 应用编排中的主题滤镜
+        if orch.compositor:
+            theme_id = choreo.get("theme", "")
+            orch.compositor.set_theme(theme_id)
     _active_session.update({"music_id": req.music_id, "mode": req.mode})
     return {"ok": True, "session": _active_session}
 
@@ -239,8 +369,44 @@ async def session_stop():
     orch = get_orchestrator()
     if orch:
         orch.stop_session()
+        if orch.compositor:
+            orch.compositor.set_theme("")   # 清除主题
     _active_session.clear()
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# 主题 + FX 目录接口
+# ---------------------------------------------------------------------------
+
+class ThemeSetRequest(BaseModel):
+    theme_id: str = ""
+    strength: float = 0.6
+
+
+@router.post("/session/theme")
+async def set_session_theme(req: ThemeSetRequest):
+    """实时切换当前主题滤镜。"""
+    from app.main import get_orchestrator
+    orch = get_orchestrator()
+    if orch and orch.compositor:
+        orch.compositor.set_theme(
+            req.theme_id,
+            {"strength": req.strength} if req.theme_id else {}
+        )
+        return {"ok": True, "theme": req.theme_id}
+    return {"ok": False, "reason": "compositor not ready"}
+
+
+@router.get("/fx/themes")
+async def list_themes():
+    """返回所有 category='theme' 的 FX 列表。"""
+    themes = [
+        {"id": meta.fx_id, "description": meta.description}
+        for meta in FX_REGISTRY.values()
+        if meta.category == "theme"
+    ]
+    return {"themes": themes}
 
 
 # ---------------------------------------------------------------------------

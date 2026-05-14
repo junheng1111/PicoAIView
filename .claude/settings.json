@@ -5,7 +5,24 @@
       "Bash(find /usr/local/lib/python3.10/dist-packages -name \"*.dist-info\" | xargs grep -l \"^Name: fastapi\" 2>/dev/null)",
       "Read(//usr/local/lib/python3.10/dist-packages/**)",
       "Bash(python3 -c ' *)",
-      "Bash(python3 /root/pico_view/venv/lib/python3.10/site-packages/fastapi/__init__.py)"
+      "Bash(python3 /root/pico_view/venv/lib/python3.10/site-packages/fastapi/__init__.py)",
+      "Bash(python3 -m py_compile /root/pico_view/web/app.js)",
+      "Bash(node --check /root/pico_view/web/app.js)",
+      "Bash(node --input-type=module)",
+      "Bash(node -e \"require\\('fs'\\).readFileSync\\('/root/pico_view/web/app.js', 'utf8'\\)\")",
+      "Bash(node /root/pico_view/web/app.js)",
+      "Bash(curl -s http://localhost:8000/ -o /dev/null -w \"%{http_code}\")",
+      "Bash(curl -s http://localhost:8000/static/app.js -o /dev/null -w \" %{http_code}\")",
+      "Bash(curl -s http://localhost:8000/static/style.css -o /dev/null -w \" %{http_code}\")",
+      "Bash(python3 -c \"import sys; sys.path.append\\('/usr/local/lib/python3.10/dist-packages'\\); from hobot_dnn import pyeasy_dnn as dnn; print\\('hobot_dnn OK'\\)\")",
+      "Bash(python3 -c \"import numpy; print\\('sys numpy:', numpy.__version__\\)\")",
+      "Bash(/root/pico_view/venv/bin/python -c \"import numpy; print\\('venv numpy:', numpy.__version__\\)\")",
+      "Bash(xargs ldd)",
+      "Bash(python3 -c \"import sys; sys.path.insert\\(0, '/usr/local/lib/python3.10/dist-packages'\\); import numpy; print\\(numpy.__version__\\)\")",
+      "Bash(venv/bin/python test_bpu_infer.py)",
+      "Bash(find /root -name \"*.jpg\" -o -name \"*.png\" 2>/dev/null | grep -v \".cache\\\\|venv\\\\|__pycache__\" | head -10)",
+      "Read(//root/**)",
+      "Bash(venv/bin/python test_bpu_infer.py /tmp/test_person.jpg)"
     ]
   }
 }

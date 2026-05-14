@@ -85,7 +85,7 @@ async def broadcast_beat(t: float, kind: str) -> None:
 
 async def broadcast_status(fps: float, lat_ms: float,
                            audio_clock: float, bpu_stats: dict,
-                           active_fx: str = "") -> None:
+                           active_fx: str = "", active_theme: str = "") -> None:
     await manager.broadcast({
         "type": "status",
         "fps": round(fps, 1),
@@ -94,6 +94,7 @@ async def broadcast_status(fps: float, lat_ms: float,
         "audio_t": round(audio_clock, 3),
         "subjects": bpu_stats.get("subjects", 0),
         "fx": active_fx,
+        "theme": active_theme,
         "bpu": bpu_stats,
     })
 

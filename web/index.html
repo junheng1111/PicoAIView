@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PicoClaw 实时编排系统</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="/static/style.css?v=4">
+    <link rel="stylesheet" href="/static/style.css?v=5">
 </head>
 <body>
     <div class="app-layout">
@@ -39,9 +39,21 @@
                 </div>
             </section>
 
+            <!-- 音乐库（已有音乐） -->
+            <section class="card">
+                <h3>音乐库
+                    <button class="btn-icon" onclick="loadMusicLibrary()" title="刷新库">↺</button>
+                </h3>
+                <select id="musicLibrarySelect" class="select-input"
+                        onchange="onLibrarySelect(this.value)">
+                    <option value="">── 选择已有音乐 ──</option>
+                </select>
+                <div id="libraryHint" class="hint">加载中...</div>
+            </section>
+
             <!-- 音乐上传 -->
             <section class="card">
-                <h3>音乐上传</h3>
+                <h3>上传新音乐</h3>
                 <input type="file" id="musicFile" accept="audio/*" style="display:none;">
                 <button class="btn btn-primary w-full" onclick="document.getElementById('musicFile').click()">
                     📎 选择音乐文件
@@ -78,6 +90,21 @@
                 </button>
             </section>
 
+            <!-- 主题滤镜 -->
+            <section class="card">
+                <h3>主题滤镜</h3>
+                <select id="themeSelect" class="select-input" onchange="applyTheme(this.value)">
+                    <option value="">── 无主题（原色）──</option>
+                </select>
+                <div class="theme-strength-row" style="display:flex;align-items:center;gap:6px;margin-top:6px;">
+                    <label class="hint" style="white-space:nowrap">强度</label>
+                    <input type="range" id="themeStrength" min="0" max="100" value="60"
+                           oninput="applyTheme(document.getElementById('themeSelect').value)"
+                           style="flex:1">
+                    <span id="themeStrengthVal" class="hint">60%</span>
+                </div>
+            </section>
+
             <!-- 任务进度 -->
             <section class="card" id="taskSection" style="display:none;">
                 <h3>任务进度</h3>
@@ -93,7 +120,7 @@
 
         <!-- 主视频区 -->
         <main class="main-area">
-            <div class="video-wrapper">
+            <div class="video-wrapper" style="position:relative">
                 <img id="videoStream" class="video-stream"
                      src="/api/video/stream"
                      alt="实时摄像头流"
@@ -101,6 +128,7 @@
                 <div class="video-overlay">
                     <span id="subjectCount" class="overlay-badge">人数: 0</span>
                     <span id="fxActive" class="overlay-badge hidden">FX: -</span>
+                    <span id="themeActive" class="overlay-badge hidden">主题: -</span>
                 </div>
             </div>
 
@@ -127,6 +155,7 @@
     </div>
 
     <audio id="audioPlayer" preload="none" style="display:none"></audio>
-    <script src="/static/app.js?v=4"></script>
+    <script src="/static/app.js?v=5"></script>
 </body>
 </html>
+
