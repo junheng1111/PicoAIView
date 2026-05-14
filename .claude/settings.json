@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip show *)",
+      "Bash(find /usr/local/lib/python3.10/dist-packages -name \"*.dist-info\" | xargs grep -l \"^Name: fastapi\" 2>/dev/null)",
+      "Read(//usr/local/lib/python3.10/dist-packages/**)",
+      "Bash(python3 -c ' *)",
+      "Bash(python3 /root/pico_view/venv/lib/python3.10/site-packages/fastapi/__init__.py)"
+    ]
+  }
+}

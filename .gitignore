@@ -1,0 +1,13 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# AI models
+*.bin
+*.pt
+*.onnx
+
+# build
+dist/
+build/

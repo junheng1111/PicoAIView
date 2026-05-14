@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PicoClaw 实时编排系统</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="/static/style.css?v=4">
+</head>
+<body>
+    <div class="app-layout">
+        <!-- 左侧控制面板 -->
+        <aside class="sidebar">
+            <div class="logo">
+                <span class="logo-icon">🎬</span>
+                <span class="logo-text">PicoClaw</span>
+            </div>
+
+            <!-- 系统状态 -->
+            <section class="card">
+                <h3>系统状态</h3>
+                <div class="status-grid">
+                    <div class="status-row">
+                        <span class="status-label">系统</span>
+                        <span class="badge loading" id="sysStatus">检查中</span>
+                    </div>
+                    <div class="status-row">
+                        <span class="status-label">摄像头</span>
+                        <span class="badge" id="cameraStatus">-</span>
+                    </div>
+                    <div class="status-row">
+                        <span class="status-label">BPU/YOLO</span>
+                        <span class="badge" id="bpuStatus">-</span>
+                    </div>
+                    <div class="status-row">
+                        <span class="status-label">特效</span>
+                        <span class="badge" id="fxStatus">-</span>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 音乐上传 -->
+            <section class="card">
+                <h3>音乐上传</h3>
+                <input type="file" id="musicFile" accept="audio/*" style="display:none;">
+                <button class="btn btn-primary w-full" onclick="document.getElementById('musicFile').click()">
+                    📎 选择音乐文件
+                </button>
+                <p class="hint">支持 MP3 / WAV / FLAC</p>
+
+                <div id="fileInfo" class="file-info hidden">
+                    <p><strong>文件:</strong> <span id="fileName">-</span></p>
+                    <p><strong>时长:</strong> <span id="fileDuration">-</span></p>
+                </div>
+
+                <div id="uploadProgress" class="hidden" style="margin-top:10px">
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="progressFill" style="width:0%"></div>
+                    </div>
+                    <p id="progressText" class="hint">上传中: 0%</p>
+                </div>
+            </section>
+
+            <!-- 操作控制 -->
+            <section class="card">
+                <h3>操作</h3>
+                <button class="btn btn-success w-full" id="analyzeBtn" onclick="analyzMusic()" disabled>
+                    🔍 分析节奏
+                </button>
+                <button class="btn btn-accent w-full" id="choreBtn" onclick="generateChoreo()" disabled>
+                    ✨ 生成编排
+                </button>
+                <button class="btn w-full" id="previewBtn" onclick="togglePreview()" disabled>
+                    ▶ 开始预览
+                </button>
+                <button class="btn btn-secondary w-full" onclick="reset()">
+                    🔄 重置
+                </button>
+            </section>
+
+            <!-- 任务进度 -->
+            <section class="card" id="taskSection" style="display:none;">
+                <h3>任务进度</h3>
+                <div id="taskStatus" class="hint">-</div>
+            </section>
+
+            <!-- 编排结果摘要 -->
+            <section class="card" id="choreoSummary" style="display:none;">
+                <h3>编排结果</h3>
+                <div id="choreoInfo" class="choreo-info"></div>
+            </section>
+        </aside>
+
+        <!-- 主视频区 -->
+        <main class="main-area">
+            <div class="video-wrapper">
+                <img id="videoStream" class="video-stream"
+                     src="/api/video/stream"
+                     alt="实时摄像头流"
+                     onerror="handleStreamError(this)" />
+                <div class="video-overlay">
+                    <span id="subjectCount" class="overlay-badge">人数: 0</span>
+                    <span id="fxActive" class="overlay-badge hidden">FX: -</span>
+                </div>
+            </div>
+
+            <!-- 底部信息栏 -->
+            <div class="bottom-bar">
+                <div class="bottom-item">
+                    <span class="bottom-label">BPM:</span>
+                    <span id="beatInfo">-</span>
+                </div>
+                <div class="bottom-item">
+                    <span class="bottom-label">当前特效:</span>
+                    <span id="currentFx">-</span>
+                </div>
+                <div class="bottom-item">
+                    <span class="bottom-label">音乐时间:</span>
+                    <span id="audioTime">0.0s</span>
+                </div>
+                <div class="bottom-item ws-status">
+                    <span id="wsIndicator" class="ws-dot disconnected"></span>
+                    <span id="wsLabel">WS 未连接</span>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <audio id="audioPlayer" preload="none" style="display:none"></audio>
+    <script src="/static/app.js?v=4"></script>
+</body>
+</html>

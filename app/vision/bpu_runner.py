@@ -1,0 +1,413 @@
+"""
+RDK X5 BPU 推理封装。
+支持 YOLOv8 检测 / 姿态估计 / 分割，异步在独立线程跑，FX Compositor 只消费 VisionState。
+
+依赖：hobot_dnn (pyeasy_dnn) —— 通过 system-site-packages 复用 RDK X5 系统包。
+"""
+
+import sys
+import threading
+import time
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
+
+import cv2
+import numpy as np
+
+# 确保系统 hobot_dnn 可导入：将系统 site-packages 追加到末尾
+# 追加而非插入头部，使 venv 的 numpy 1.x 优先于系统 numpy 2.x
+_HOBOT_SYS_PATH = "/usr/local/lib/python3.10/dist-packages"
+if _HOBOT_SYS_PATH not in sys.path:
+    sys.path.append(_HOBOT_SYS_PATH)
+
+try:
+    from hobot_dnn import pyeasy_dnn as dnn  # RDK X5 BPU Python 绑定
+    _DNN_AVAILABLE = True
+    print("[BPU] hobot_dnn 加载成功")
+except (ImportError, AttributeError) as _e:
+    _DNN_AVAILABLE = False
+    dnn = None  # 开发机 fallback：推理不可用，返回空结果
+    print(f"[BPU] hobot_dnn 不可用: {_e}")
+
+COCO_PERSON_CLASS_ID = 0
+COCO_NUM_CLASSES = 80
+
+
+# ---------------------------------------------------------------------------
+# 数据结构
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Detection:
+    label: str
+    confidence: float
+    bbox: Tuple[float, float, float, float]  # 归一化 [x, y, w, h]
+    class_id: int
+
+
+@dataclass(frozen=True)
+class Keypoint:
+    x: float   # 归一化
+    y: float
+    score: float
+
+
+@dataclass(frozen=True)
+class PoseDetection:
+    detection: Detection
+    keypoints: List[Keypoint]  # 17 COCO keypoints
+
+
+@dataclass
+class VisionState:
+    """FX Compositor 读取的视觉状态快照（最近一帧推理结果）。"""
+    timestamp: float = 0.0
+    detections: List[Detection] = field(default_factory=list)
+    pose_detections: List[PoseDetection] = field(default_factory=list)
+    # seg_mask: Optional[np.ndarray] = None  # (H, W) uint8，按需启用
+    primary_id: int = -1          # ByteTracker 主体 track_id
+    subject_count: int = 0
+    motion_intensity: float = 0.0  # 0–1，由帧差估计
+
+    def primary_bbox(self) -> Optional[Tuple[float, float, float, float]]:
+        """返回主体归一化 bbox，无主体时返回 None。"""
+        if not self.detections:
+            return None
+        # 返回面积最大的 person bbox 作为主体
+        persons = [d for d in self.detections if d.class_id == COCO_PERSON_CLASS_ID]
+        if not persons:
+            return None
+        return max(persons, key=lambda d: d.bbox[2] * d.bbox[3]).bbox
+
+
+# ---------------------------------------------------------------------------
+# 单模型推理器（hobot_dnn 封装）
+# ---------------------------------------------------------------------------
+
+class _BpuModel:
+    """单个 .bin 模型的推理封装，线程安全。"""
+
+    def __init__(self, bin_path: str):
+        self.bin_path = bin_path
+        self._lock = threading.Lock()
+        self._models = None
+        self._input_h = 640
+        self._input_w = 640
+        self._ready = False
+        self._last_error_ts: float = 0.0
+        self._init_lock = threading.Lock()
+
+    def _ensure_ready(self) -> bool:
+        if self._ready:
+            return True
+        if not _DNN_AVAILABLE:
+            return False
+        now = time.time()
+        if self._last_error_ts != 0.0 and now - self._last_error_ts < 5.0:
+            return False
+        with self._init_lock:
+            if self._ready:
+                return True
+            try:
+                self._models = dnn.load([self.bin_path])
+                props = self._models[0].inputs[0].properties
+                if hasattr(props, "valid_shape"):
+                    shape = props.valid_shape
+                    if len(shape) == 4:
+                        self._input_h = int(shape[1]) if shape[1] > 3 else int(shape[2])
+                        self._input_w = int(shape[2]) if shape[1] > 3 else int(shape[3])
+                self._ready = True
+                print(f"[BpuModel] 加载成功: {self.bin_path}  输入 {self._input_h}×{self._input_w}")
+                return True
+            except Exception as e:
+                self._last_error_ts = time.time()
+                self._ready = False
+                self._models = None
+                print(f"[BpuModel] 初始化失败 {self.bin_path}: {e}")
+                return False
+
+    def _preprocess_nv12(self, frame_bgr: np.ndarray) -> np.ndarray:
+        """BGR → NV12，RDK X5 Bayese 系列模型要求 NV12 输入。"""
+        resized = cv2.resize(frame_bgr, (self._input_w, self._input_h),
+                             interpolation=cv2.INTER_LINEAR)
+        yuv = cv2.cvtColor(resized, cv2.COLOR_BGR2YUV_I420)
+        h, w = self._input_h, self._input_w
+        y_plane = yuv[:h, :]
+        uv_i420 = yuv[h:, :].reshape(-1, 2)
+        uv_nv12 = uv_i420[:, [0, 1]].reshape(h // 2, w)
+        nv12 = np.vstack([y_plane, uv_nv12]).astype(np.uint8)
+        return nv12[np.newaxis, ...]
+
+    def forward(self, frame_bgr: np.ndarray):
+        """执行推理，返回原始 outputs 列表，推理失败返回 None。"""
+        with self._lock:
+            if not self._ensure_ready() or self._models is None:
+                return None
+            inp = self._preprocess_nv12(frame_bgr)
+            try:
+                return self._models[0].forward(inp)
+            except Exception as e:
+                print(f"[BpuModel] forward 失败 {self.bin_path}: {e}")
+                return None
+
+
+# ---------------------------------------------------------------------------
+# 检测解析（YOLOv8 with on-chip NMS）
+# ---------------------------------------------------------------------------
+
+def _parse_detections(
+    outputs, conf_th: float = 0.25, only_person: bool = False
+) -> List[Detection]:
+    """解析 BPU 推理输出。
+
+    预期格式：outputs[0].buffer shape = [1, num_det, 6]
+    每行 [x1, y1, x2, y2, score, class_id]，坐标归一化 0-1。
+    """
+    if outputs is None:
+        return []
+
+    buf = np.array(outputs[0].buffer).squeeze()
+    if buf.ndim == 1:
+        buf = buf[np.newaxis, :]
+    if buf.ndim != 2 or buf.shape[1] < 6:
+        return []
+
+    dets: List[Detection] = []
+    for row in buf:
+        x1, y1, x2, y2, score, cls = (
+            float(row[0]), float(row[1]), float(row[2]),
+            float(row[3]), float(row[4]), int(row[5])
+        )
+        if score < conf_th:
+            continue
+        if only_person and cls != COCO_PERSON_CLASS_ID:
+            continue
+
+        x1 = max(0.0, min(1.0, x1))
+        y1 = max(0.0, min(1.0, y1))
+        x2 = max(0.0, min(1.0, x2))
+        y2 = max(0.0, min(1.0, y2))
+        w = x2 - x1
+        h_box = y2 - y1
+        if w <= 0 or h_box <= 0:
+            continue
+
+        label = "person" if cls == COCO_PERSON_CLASS_ID else f"class_{cls}"
+        dets.append(Detection(label=label, confidence=score,
+                               bbox=(x1, y1, w, h_box), class_id=cls))
+
+    return sorted(dets, key=lambda d: -d.confidence)
+
+
+def _parse_pose(outputs) -> List[PoseDetection]:
+    """解析姿态模型输出。
+    
+    预期格式：
+    outputs[0].buffer: [1, num_det, 6]  (bbox + score + cls)
+    outputs[1].buffer: [1, num_det, 17, 3] (x, y, score 归一化)
+    若模型只有一个输出，则降级返回无关键点的 PoseDetection。
+    """
+    if outputs is None:
+        return []
+
+    det_buf = np.array(outputs[0].buffer).squeeze()
+    if det_buf.ndim == 1:
+        det_buf = det_buf[np.newaxis, :]
+
+    has_kpts = len(outputs) > 1
+    if has_kpts:
+        kpt_buf = np.array(outputs[1].buffer).squeeze()  # (num_det, 17, 3)
+        if kpt_buf.ndim == 2:
+            kpt_buf = kpt_buf[np.newaxis, ...]
+
+    result: List[PoseDetection] = []
+    for i, row in enumerate(det_buf):
+        if len(row) < 6:
+            continue
+        x1, y1, x2, y2, score, cls = float(row[0]), float(row[1]), float(row[2]), \
+                                      float(row[3]), float(row[4]), int(row[5])
+        if score < 0.25 or cls != COCO_PERSON_CLASS_ID:
+            continue
+
+        w, h_box = x2 - x1, y2 - y1
+        det = Detection(label="person", confidence=score,
+                        bbox=(max(0.0, x1), max(0.0, y1),
+                              max(0.0, w), max(0.0, h_box)),
+                        class_id=COCO_PERSON_CLASS_ID)
+
+        keypoints: List[Keypoint] = []
+        if has_kpts and i < kpt_buf.shape[0]:
+            for kp in kpt_buf[i]:  # (17, 3)
+                keypoints.append(Keypoint(x=float(kp[0]), y=float(kp[1]),
+                                          score=float(kp[2])))
+
+        result.append(PoseDetection(detection=det, keypoints=keypoints))
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# BPU 资源调度器：管理多个模型，独立线程持续推理
+# ---------------------------------------------------------------------------
+
+class BpuRunner:
+    """
+    常驻：yolov8s_detect（检测）+ yolov8s_pose（姿态）。
+    按需加载：yolov8s_seg（分割）、fast_depth（深度）、scrfd_2.5g（人脸）。
+
+    FX Compositor 通过 vision_state() 读取最新 VisionState，不阻塞。
+    """
+
+    MODEL_DETECT = "detect"
+    MODEL_POSE   = "pose"
+    MODEL_SEG    = "seg"
+    MODEL_DEPTH  = "depth"
+    MODEL_FACE   = "face"
+
+    def __init__(self, model_dir: str = "models"):
+        self._model_dir = model_dir
+        self._models: Dict[str, _BpuModel] = {}
+        self._state = VisionState()
+        self._state_lock = threading.Lock()
+
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+
+        # 帧差估计 motion
+        self._prev_gray: Optional[np.ndarray] = None
+
+        # 活跃模型集合（运行时可动态变更）
+        self._active_models: set = {self.MODEL_DETECT, self.MODEL_POSE}
+        self._model_lock = threading.Lock()
+
+    # ------------------------------------------------------------------
+    # 公开 API
+    # ------------------------------------------------------------------
+
+    def start(self, detect_bin: str, pose_bin: str,
+              seg_bin: Optional[str] = None,
+              depth_bin: Optional[str] = None,
+              face_bin: Optional[str] = None) -> None:
+        """初始化并启动后台推理线程。"""
+        def _add(key, path):
+            if path:
+                self._models[key] = _BpuModel(path)
+
+        _add(self.MODEL_DETECT, detect_bin)
+        _add(self.MODEL_POSE,   pose_bin)
+        _add(self.MODEL_SEG,    seg_bin)
+        _add(self.MODEL_DEPTH,  depth_bin)
+        _add(self.MODEL_FACE,   face_bin)
+
+        self._running = True
+        self._thread = threading.Thread(target=self._infer_loop, daemon=True,
+                                        name="bpu_runner")
+        self._thread.start()
+        print("[BpuRunner] 后台推理线程已启动")
+
+    def stop(self) -> None:
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=2.0)
+
+    def vision_state(self) -> VisionState:
+        """线程安全地读取最新 VisionState（FX Compositor 调用）。"""
+        with self._state_lock:
+            return self._state
+
+    def push_frame(self, frame_bgr: np.ndarray) -> None:
+        """主线程把摄像头帧推入，推理线程消费。"""
+        self._latest_frame = frame_bgr
+
+    def loaded_models(self) -> list:
+        """返回已注册的模型 key 列表（不论 DNN 是否可用）。"""
+        return list(self._models.keys())
+
+    def enable_model(self, model_key: str) -> None:
+        with self._model_lock:
+            self._active_models.add(model_key)
+
+    def disable_model(self, model_key: str) -> None:
+        with self._model_lock:
+            self._active_models.discard(model_key)
+
+    # ------------------------------------------------------------------
+    # 内部推理循环
+    # ------------------------------------------------------------------
+
+    _latest_frame: Optional[np.ndarray] = None
+
+    def _infer_loop(self) -> None:
+        last_ts = 0.0
+        while self._running:
+            frame = self._latest_frame
+            if frame is None:
+                time.sleep(0.01)
+                continue
+
+            now = time.time()
+            if now - last_ts < 0.033:   # 最多 30fps
+                time.sleep(0.005)
+                continue
+            last_ts = now
+
+            with self._model_lock:
+                active = set(self._active_models)
+
+            dets: List[Detection] = []
+            poses: List[PoseDetection] = []
+
+            # 检测
+            if self.MODEL_DETECT in active and self.MODEL_DETECT in self._models:
+                outputs = self._models[self.MODEL_DETECT].forward(frame)
+                dets = _parse_detections(outputs, conf_th=0.25)
+
+            # 姿态
+            if self.MODEL_POSE in active and self.MODEL_POSE in self._models:
+                outputs = self._models[self.MODEL_POSE].forward(frame)
+                poses = _parse_pose(outputs)
+
+            # motion intensity（帧差均值）
+            motion = 0.0
+            gray = cv2.cvtColor(
+                cv2.resize(frame, (320, 180)), cv2.COLOR_BGR2GRAY
+            ).astype(np.float32)
+            if self._prev_gray is not None:
+                diff = np.abs(gray - self._prev_gray).mean()
+                motion = float(min(1.0, diff / 30.0))
+            self._prev_gray = gray
+
+            persons = [d for d in dets if d.class_id == COCO_PERSON_CLASS_ID]
+            new_state = VisionState(
+                timestamp=now,
+                detections=dets,
+                pose_detections=poses,
+                primary_id=0,
+                subject_count=len(persons),
+                motion_intensity=motion,
+            )
+
+            with self._state_lock:
+                self._state = new_state
+
+    # ------------------------------------------------------------------
+    # 序列化（给 WebSocket 下行推送）
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def serialize_state(vs: VisionState) -> Dict[str, Any]:
+        return {
+            "t": vs.timestamp,
+            "subjects": vs.subject_count,
+            "primary_id": vs.primary_id,
+            "motion": round(vs.motion_intensity, 3),
+            "detections": [
+                {
+                    "label": d.label,
+                    "confidence": round(d.confidence, 3),
+                    "bbox": [round(v, 4) for v in d.bbox],
+                    "class_id": d.class_id,
+                }
+                for d in vs.detections
+            ],
+        }

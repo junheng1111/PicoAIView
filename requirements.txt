@@ -1,0 +1,38 @@
+# PicoClaw RDK X5 依赖
+# 安装方式：pip install -r requirements.txt
+# 注：hobot_dnn / hobot_vio 通过 system-site-packages 复用 RDK X5 系统包
+
+# --- Web 框架 ---
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9
+
+# --- WebRTC ---
+aiortc>=1.9.0
+av>=12.0.0
+
+# --- 音频分析 ---
+librosa>=0.10.0
+soundfile>=0.12.0
+numpy>=1.24.0
+
+# --- 视觉处理 ---
+opencv-python-headless>=4.9.0
+
+# --- AI 编排 / LLM ---
+anthropic>=0.25.0        # 主选 LLM Provider (Claude)
+openai>=1.14.0           # 备选 LLM Provider (GPT)
+tenacity>=8.2.0          # LLM 调用重试
+
+# --- Schema 校验 ---
+pydantic>=2.6.0
+
+# --- 缓存 ---
+diskcache>=5.6.0
+
+# --- BPU 推理（RDK X5 系统包，通过 --system-site-packages 复用）---
+# hobot-dnn      # 不在此处 pip install，由 RDK X5 系统镜像提供
+
+# --- Shader（开发期）---
+# moderngl>=5.10.0
+# PyOpenGL>=3.1.7

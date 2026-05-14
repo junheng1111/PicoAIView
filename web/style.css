@@ -1,0 +1,246 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+html, body {
+    height: 100%;
+    overflow: hidden;
+}
+
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background: #0f0f13;
+    color: #e0e0e0;
+    line-height: 1.5;
+}
+
+/* ── 整体布局：侧边栏 + 主视频区 ── */
+.app-layout {
+    display: flex;
+    height: 100vh;
+    width: 100vw;
+    overflow: hidden;
+}
+
+/* ── 左侧控制面板 ── */
+.sidebar {
+    width: 280px;
+    min-width: 280px;
+    background: #1a1a24;
+    border-right: 1px solid #2a2a38;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    overflow-y: auto;
+    padding: 0 0 16px 0;
+}
+
+.logo {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 18px 20px 14px;
+    border-bottom: 1px solid #2a2a38;
+    background: linear-gradient(135deg, #667eea22 0%, #764ba222 100%);
+}
+
+.logo-icon { font-size: 24px; }
+.logo-text {
+    font-size: 20px;
+    font-weight: 700;
+    background: linear-gradient(135deg, #667eea, #a78bfa);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+/* ── 卡片 ── */
+.card {
+    margin: 12px 14px 0;
+    padding: 14px 16px;
+    background: #22223a;
+    border-radius: 10px;
+    border: 1px solid #2e2e48;
+}
+
+.card h3 {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #667eea;
+    margin-bottom: 10px;
+    font-weight: 700;
+}
+
+/* ── 状态网格 ── */
+.status-grid { display: flex; flex-direction: column; gap: 7px; }
+.status-row  { display: flex; justify-content: space-between; align-items: center; }
+.status-label { font-size: 12px; color: #aaa; }
+
+.badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 10px;
+    background: #333355;
+    color: #aaa;
+    font-weight: 600;
+    font-size: 11px;
+}
+.badge.ok      { background: #1a4d2a; color: #6bcb77; }
+.badge.error   { background: #4d1a1a; color: #ff6b6b; }
+.badge.warning { background: #4d3a00; color: #ffd93d; }
+.badge.info    { background: #1a2d4d; color: #60a5fa; }
+.badge.loading { animation: pulse 1.5s infinite; }
+
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+/* ── 提示文字 ── */
+.hint {
+    font-size: 11px;
+    color: #666;
+    margin-top: 6px;
+}
+
+/* ── 文件信息 ── */
+.file-info {
+    margin-top: 10px;
+    padding: 10px;
+    background: #1a1a2e;
+    border-radius: 6px;
+    font-size: 12px;
+    color: #bbb;
+    line-height: 1.7;
+}
+.hidden { display: none !important; }
+
+/* ── 进度条 ── */
+.progress-bar {
+    width: 100%; height: 4px;
+    background: #2a2a3a;
+    border-radius: 2px;
+    overflow: hidden;
+}
+.progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #667eea, #a78bfa);
+    transition: width 0.3s ease;
+}
+
+/* ── 按钮 ── */
+.btn {
+    padding: 9px 14px;
+    border: none;
+    border-radius: 7px;
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 12px;
+    transition: all 0.2s ease;
+    display: inline-block;
+    text-align: center;
+}
+.w-full { width: 100%; margin-bottom: 8px; display: block; }
+
+.btn-primary  { background: #667eea; color: #fff; }
+.btn-primary:hover:not(:disabled)  { background: #5568d3; }
+
+.btn-success  { background: #2d6a36; color: #fff; }
+.btn-success:hover:not(:disabled)  { background: #3a8547; }
+
+.btn-accent   { background: #5b2d8a; color: #fff; }
+.btn-accent:hover:not(:disabled)   { background: #7240a8; }
+
+.btn          { background: #2e2e4a; color: #ccc; }
+.btn:hover:not(:disabled)          { background: #3d3d5e; }
+
+.btn-secondary { background: #1e1e2e; color: #888; }
+.btn-secondary:hover { background: #2a2a3e; }
+
+.btn:disabled  { opacity: 0.4; cursor: not-allowed; }
+
+/* ── 编排结果 ── */
+.choreo-info {
+    font-size: 11px;
+    color: #bbb;
+    line-height: 1.8;
+}
+
+/* ── 主视频区 ── */
+.main-area {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    background: #080810;
+    overflow: hidden;
+}
+
+.video-wrapper {
+    flex: 1;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #000;
+    overflow: hidden;
+}
+
+.video-stream {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    display: block;
+}
+
+/* YOLO overlay badge（左上角） */
+.video-overlay {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    display: flex;
+    gap: 8px;
+    flex-direction: column;
+    pointer-events: none;
+}
+
+.overlay-badge {
+    display: inline-block;
+    padding: 4px 12px;
+    background: rgba(0,0,0,0.65);
+    color: #6bcb77;
+    font-size: 13px;
+    font-weight: 700;
+    border-radius: 6px;
+    border: 1px solid rgba(107,203,119,0.4);
+    backdrop-filter: blur(4px);
+}
+
+/* ── 底部状态栏 ── */
+.bottom-bar {
+    display: flex;
+    align-items: center;
+    gap: 30px;
+    padding: 10px 20px;
+    background: #111118;
+    border-top: 1px solid #1e1e2e;
+    font-size: 12px;
+    color: #888;
+    flex-shrink: 0;
+}
+
+.bottom-item { display: flex; align-items: center; gap: 6px; }
+.bottom-label { color: #555; font-weight: 600; }
+
+.ws-status { margin-left: auto; }
+.ws-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+}
+.ws-dot.connected    { background: #6bcb77; box-shadow: 0 0 6px #6bcb77; }
+.ws-dot.disconnected { background: #555; }
+
+/* ── 滚动条 ── */
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-track { background: #111; }
+::-webkit-scrollbar-thumb { background: #333355; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #667eea; }

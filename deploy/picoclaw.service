@@ -1,0 +1,17 @@
+[Unit]
+Description=PicoClaw — 地瓜机器人 RDK X5 AI 视觉律动系统
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/pico_view
+EnvironmentFile=/etc/picoclaw/picoclaw.env
+ExecStart=/usr/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
