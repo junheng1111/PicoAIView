@@ -34,8 +34,6 @@ def get_orchestrator() -> Optional[Orchestrator]:
 # ---------------------------------------------------------------------------
 
 MODEL_DIR   = os.getenv("PICOCLAW_MODEL_DIR",   "models")
-DETECT_BIN  = os.getenv("PICOCLAW_DETECT_BIN",  f"{MODEL_DIR}/yolov8s_detect_bayese_640x640_nv12.bin")
-# 只有检测模型存在；姿态/分割模型按需添加到 models/ 后自动生效
 _pose_default = f"{MODEL_DIR}/yolov8s_pose_bayese_640x640_nv12.bin"
 POSE_BIN    = os.getenv("PICOCLAW_POSE_BIN",
                _pose_default if os.path.exists(_pose_default) else None)
@@ -66,7 +64,6 @@ async def lifespan(app: FastAPI):
     # 初始化 BPU 推理
     bpu = BpuRunner(model_dir=MODEL_DIR)
     bpu.start(
-        detect_bin=DETECT_BIN,
         pose_bin=POSE_BIN,
         seg_bin=SEG_BIN,
         depth_bin=DEPTH_BIN,

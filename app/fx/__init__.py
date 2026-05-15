@@ -11,5 +11,6 @@ import app.fx.overlay        # noqa: F401
 import app.fx.time_domain    # noqa: F401
 import app.fx.stylization    # noqa: F401
 import app.fx.ai_aware       # noqa: F401
+import app.fx.pink_halo      # noqa: F401
 
 __all__ = ["FX_REGISTRY", "build_fx_catalog", "apply_fx", "register_fx"]

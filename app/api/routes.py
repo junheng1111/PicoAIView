@@ -6,11 +6,12 @@ FastAPI REST 路由。§7.1。
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import urllib.parse
 
@@ -29,13 +30,15 @@ router = APIRouter(prefix="/api")
 
 # 内存存储（与磁盘 JSON 双写同步）
 _music_store: Dict[str, Dict] = {}
-_choreo_store: Dict[str, Dict] = {}
-_task_store: Dict[str, str] = {}   # task_id → "running" | "done" | "error"
+# 编排按 choreo_id 存储，与 music_id 解耦；同一首歌可有多套编排
+_choreo_store: Dict[str, Dict] = {}   # choreo_id → choreo data (含 music_id 字段)
+_task_store: Dict[str, str] = {}      # task_id → "running" | "done" | "error"
 
-UPLOAD_DIR = Path(os.getenv("PICOCLAW_UPLOAD_DIR", "/tmp/picoclaw_uploads"))
-CACHE_DIR  = Path(os.getenv("PICOCLAW_CACHE_DIR",  "/tmp/picoclaw_cache"))
-# 持久化目录：音乐元数据 + 编排 JSON
-DATA_DIR   = Path(os.getenv("PICOCLAW_DATA_DIR",   "/tmp/picoclaw_data"))
+# 持久化目录：位于项目根目录 data/，重启不丢失
+_PROJECT_ROOT = Path(__file__).parent.parent.parent
+DATA_DIR   = Path(os.getenv("PICOCLAW_DATA_DIR",   str(_PROJECT_ROOT / "data")))
+UPLOAD_DIR = Path(os.getenv("PICOCLAW_UPLOAD_DIR", str(DATA_DIR / "uploads")))
+CACHE_DIR  = Path(os.getenv("PICOCLAW_CACHE_DIR",  str(DATA_DIR / "cache")))
 CHOREO_DIR = DATA_DIR / "choreos"
 FEAT_DIR   = DATA_DIR / "feats"
 MUSIC_DB   = DATA_DIR / "music_library.json"
@@ -61,25 +64,39 @@ def _save_music_library() -> None:
 
 
 def _load_music_library() -> None:
-    """启动时从 music_library.json 恢复内存状态。"""
-    if not MUSIC_DB.exists():
-        return
-    try:
-        with open(MUSIC_DB, encoding="utf-8") as f:
-            data = json.load(f)
-        for mid, info in data.items():
-            if Path(info.get("path", "")).exists():
-                _music_store[mid] = info
-                # 尝试恢复 feat（beat 分析结果）
-                feat_path = FEAT_DIR / f"{mid}.json"
-                if feat_path.exists():
-                    try:
-                        with open(feat_path, encoding="utf-8") as ff:
-                            _music_store[mid]["feat"] = json.load(ff)
-                    except Exception:
-                        pass
-    except Exception as e:
-        print(f"[routes] 加载音乐库失败: {e}")
+    """启动时从 music_library.json 和 choreos/ 目录恢复内存状态。"""
+    if MUSIC_DB.exists():
+        try:
+            with open(MUSIC_DB, encoding="utf-8") as f:
+                data = json.load(f)
+            for mid, info in data.items():
+                if Path(info.get("path", "")).exists():
+                    _music_store[mid] = info
+                    feat_path = FEAT_DIR / f"{mid}.json"
+                    if feat_path.exists():
+                        try:
+                            with open(feat_path, encoding="utf-8") as ff:
+                                _music_store[mid]["feat"] = json.load(ff)
+                        except Exception:
+                            pass
+        except Exception as e:
+            print(f"[routes] 加载音乐库失败: {e}")
+
+    # 扫描 choreos/ 目录，按 choreo_id 恢复（与 music_id 解耦）
+    for p in CHOREO_DIR.glob("*.json"):
+        try:
+            with open(p, encoding="utf-8") as f:
+                choreo = json.load(f)
+            cid = choreo.get("choreo_id", p.stem)
+            _choreo_store[cid] = choreo
+            # 把 choreo_id 追加进对应音乐的列表（若已在 _music_store 里）
+            mid = choreo.get("music_id", "")
+            if mid and mid in _music_store:
+                ids = _music_store[mid].setdefault("choreo_ids", [])
+                if cid not in ids:
+                    ids.append(cid)
+        except Exception:
+            pass
 
 
 def _save_feat(music_id: str, feat: Dict) -> None:
@@ -94,10 +111,10 @@ def _save_feat(music_id: str, feat: Dict) -> None:
         print(f"[routes] 保存 feat 失败: {e}")
 
 
-def _save_choreo(music_id: str, data: Dict) -> None:
-    """把编排保存为 choreos/<music_id>.json。"""
+def _save_choreo(choreo_id: str, data: Dict) -> None:
+    """把编排保存为 choreos/<choreo_id>.json（data 中必须含 choreo_id 和 music_id 字段）。"""
     try:
-        path = CHOREO_DIR / f"{music_id}.json"
+        path = CHOREO_DIR / f"{choreo_id}.json"
         tmp = path.with_suffix(".json.tmp")
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -106,16 +123,17 @@ def _save_choreo(music_id: str, data: Dict) -> None:
         print(f"[routes] 保存编排失败: {e}")
 
 
-def _load_choreo_from_disk(music_id: str) -> Optional[Dict]:
-    """从磁盘加载编排（若内存无缓存时使用）。"""
-    path = CHOREO_DIR / f"{music_id}.json"
-    if path.exists():
-        try:
-            with open(path, encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return None
+def _choreo_ids_for(music_id: str) -> List[str]:
+    """返回某首歌的所有 choreo_id 列表（按创建时间排序）。"""
+    return _music_store.get(music_id, {}).get("choreo_ids", [])
+
+
+def _latest_choreo(music_id: str) -> Optional[Dict]:
+    """返回某首歌最新一套编排（内存）；无则返回 None。"""
+    ids = _choreo_ids_for(music_id)
+    if not ids:
+        return None
+    return _choreo_store.get(ids[-1])
 
 
 # 启动时恢复
@@ -131,23 +149,38 @@ async def upload_music_raw(request: Request):
     """快速上传：直接读取原始字节，绕过 python-multipart 解析（ARM 上快 37x）。
     Header: X-Filename: 文件名（可选）
     Body: 原始音频字节（application/octet-stream）
+
+    同文件（SHA256 相同）会自动去重：返回已有 music_id，不重复写磁盘。
     """
     music_id = uuid.uuid4().hex
     filename = urllib.parse.unquote(request.headers.get("x-filename", "audio.mp3"))
     ext = Path(filename).suffix or ".mp3"
     dest = UPLOAD_DIR / f"{music_id}{ext}"
 
-    # 流式写入，避免一次性读入大文件
+    hasher = hashlib.sha256()
     written = 0
     with open(dest, "wb") as f:
         async for chunk in request.stream():
             f.write(chunk)
+            hasher.update(chunk)
             written += len(chunk)
 
-    _music_store[music_id] = {"path": str(dest), "filename": filename,
-                               "status": "uploaded", "size": written}
+    file_hash = hasher.hexdigest()
+
+    # 去重：相同 SHA256 → 返回已有记录，删除刚写入的重复文件
+    for mid, info in _music_store.items():
+        if info.get("sha256") == file_hash:
+            dest.unlink(missing_ok=True)
+            return {"music_id": mid, "size": info.get("size", written),
+                    "deduplicated": True, "filename": info.get("filename")}
+
+    _music_store[music_id] = {
+        "path": str(dest), "filename": filename,
+        "status": "uploaded", "size": written,
+        "sha256": file_hash, "choreo_ids": [],
+    }
     _save_music_library()
-    return {"music_id": music_id, "size": written}
+    return {"music_id": music_id, "size": written, "deduplicated": False}
 
 
 @router.get("/music/{music_id}/audio")
@@ -208,15 +241,16 @@ async def list_music_library():
     items = []
     for mid, info in _music_store.items():
         feat = info.get("feat", {})
-        has_choreo = (mid in _choreo_store
-                      or (CHOREO_DIR / f"{mid}.json").exists())
+        choreo_ids = info.get("choreo_ids", [])
         items.append({
             "music_id": mid,
             "filename": info.get("filename", ""),
             "status": info.get("status", "uploaded"),
             "tempo": info.get("tempo") or feat.get("tempo"),
             "duration": info.get("duration") or feat.get("duration"),
-            "has_choreo": has_choreo,
+            "choreo_count": len(choreo_ids),
+            "choreo_ids": choreo_ids,
+            "has_choreo": len(choreo_ids) > 0,
         })
     items.sort(key=lambda x: x["filename"].lower())
     return {"items": items}
@@ -254,74 +288,124 @@ class ChoreoAIRequest(BaseModel):
 @router.post("/music/{music_id}/choreo/ai")
 async def trigger_ai_choreo(music_id: str, req: ChoreoAIRequest,
                              background_tasks: BackgroundTasks):
-    """触发 LLM Choreographer 生成 ChoreoPlan。"""
+    """触发 LLM Choreographer 生成新 ChoreoPlan（每次生成一套新编排，不覆盖旧的）。"""
     if music_id not in _music_store:
         raise HTTPException(404, "music_id not found")
     if _music_store[music_id].get("status") != "analyzed":
         raise HTTPException(400, "请先调用 /analyze")
 
-    task_id = uuid.uuid4().hex
+    choreo_id = uuid.uuid4().hex
+    task_id   = uuid.uuid4().hex
     _task_store[task_id] = "running"
 
     async def _run():
         try:
             feat = _music_store[music_id]["feat"]
+            audio_path = _music_store[music_id].get("path")
             plan, track, source = await orchestrate(
                 music_id=music_id,
                 feat=feat,
                 style=req.style or "energetic",
                 force_refresh=req.force_refresh,
                 model_override=req.model,
+                audio_path=audio_path,
             )
             choreo_data = {
-                "source": source,
-                "plan": plan.model_dump() if plan else None,
-                "track": track,
-                "style": req.style,
-                "theme": (plan.model_dump() or {}).get("theme", "") if plan else "",
+                "choreo_id": choreo_id,
+                "music_id":  music_id,
+                "source":    source,
+                "plan":      plan.model_dump() if plan else None,
+                "track":     track,
+                "style":     req.style,
+                "theme":     (plan.model_dump() or {}).get("theme", "") if plan else "",
             }
-            _choreo_store[music_id] = choreo_data
-            _save_choreo(music_id, choreo_data)   # 持久化
+            _choreo_store[choreo_id] = choreo_data
+            _save_choreo(choreo_id, choreo_data)
+            # 追加 choreo_id 进音乐记录
+            ids = _music_store[music_id].setdefault("choreo_ids", [])
+            if choreo_id not in ids:
+                ids.append(choreo_id)
+            _save_music_library()
             _task_store[task_id] = "done"
         except Exception as e:
             _task_store[task_id] = f"error: {e}"
 
     background_tasks.add_task(_run)
-    return {"task_id": task_id}
+    return {"task_id": task_id, "choreo_id": choreo_id}
+
+
+@router.get("/music/{music_id}/choreos")
+async def list_choreos(music_id: str):
+    """列出某首歌的所有编排摘要（最新在后）。"""
+    if music_id not in _music_store:
+        raise HTTPException(404, "music_id not found")
+    result = []
+    for cid in _choreo_ids_for(music_id):
+        d = _choreo_store.get(cid)
+        if d:
+            result.append({
+                "choreo_id": cid,
+                "source":    d.get("source"),
+                "style":     d.get("style"),
+                "theme":     d.get("theme", ""),
+                "track_count": len(d.get("track", [])),
+            })
+    return {"choreos": result}
 
 
 @router.get("/music/{music_id}/choreo")
 async def get_choreo(music_id: str):
-    """获取当前编排（内存无则从磁盘加载）。"""
-    data = _choreo_store.get(music_id)
+    """获取最新一套编排（向后兼容旧接口）。"""
+    data = _latest_choreo(music_id)
     if not data:
-        data = _load_choreo_from_disk(music_id)
-        if not data:
-            raise HTTPException(404, "choreo not found")
-        _choreo_store[music_id] = data   # 内存缓存
+        raise HTTPException(404, "choreo not found")
     return {
-        "source": data.get("source"),
-        "style": data.get("style"),
-        "theme": data.get("theme", ""),
-        "plan": data.get("plan"),
+        "choreo_id":   data.get("choreo_id"),
+        "source":      data.get("source"),
+        "style":       data.get("style"),
+        "theme":       data.get("theme", ""),
+        "plan":        data.get("plan"),
         "track_count": len(data.get("track", [])),
     }
 
 
+@router.get("/choreo/{choreo_id}")
+async def get_choreo_by_id(choreo_id: str):
+    """按 choreo_id 获取具体编排详情。"""
+    data = _choreo_store.get(choreo_id)
+    if not data:
+        raise HTTPException(404, "choreo not found")
+    return data
+
+
 @router.put("/music/{music_id}/choreo")
 async def put_choreo(music_id: str, body: Dict[str, Any]):
-    """上传自定义编排（source=manual）并持久化。"""
-    data = {"source": "manual", "track": body.get("track", []),
-            "plan": body.get("plan"), "theme": body.get("theme", ""),
-            "style": body.get("style", "")}
-    _choreo_store[music_id] = data
-    _save_choreo(music_id, data)
-    return {"ok": True}
+    """上传自定义编排（source=manual），生成新 choreo_id 并持久化。"""
+    if music_id not in _music_store:
+        raise HTTPException(404, "music_id not found")
+    choreo_id = uuid.uuid4().hex
+    data = {
+        "choreo_id": choreo_id,
+        "music_id":  music_id,
+        "source":    "manual",
+        "track":     body.get("track", []),
+        "plan":      body.get("plan"),
+        "theme":     body.get("theme", ""),
+        "style":     body.get("style", ""),
+    }
+    _choreo_store[choreo_id] = data
+    _save_choreo(choreo_id, data)
+    ids = _music_store[music_id].setdefault("choreo_ids", [])
+    if choreo_id not in ids:
+        ids.append(choreo_id)
+    _save_music_library()
+    return {"ok": True, "choreo_id": choreo_id}
 
 
 @router.post("/music/{music_id}/choreo/regenerate")
 async def regenerate_choreo(music_id: str, req: ChoreoAIRequest,
                              background_tasks: BackgroundTasks):
+    """生成新编排（不覆盖旧编排，旧的仍可访问）。"""
     req.force_refresh = True
     return await trigger_ai_choreo(music_id, req, background_tasks)
 
@@ -331,8 +415,9 @@ async def regenerate_choreo(music_id: str, req: ChoreoAIRequest,
 # ---------------------------------------------------------------------------
 
 class SessionStartRequest(BaseModel):
-    music_id: str
-    mode: str = "auto"   # rhythm | manual | auto
+    music_id:  str
+    choreo_id: Optional[str] = None   # 不填则使用该音乐最新编排
+    mode:      str = "auto"            # rhythm | manual | auto
 
 
 _active_session: Dict = {}
@@ -340,26 +425,37 @@ _active_session: Dict = {}
 
 @router.post("/session/start")
 async def session_start(req: SessionStartRequest):
-    """启动演出 session，通知 Orchestrator并应用主题。"""
+    """启动演出 session，通知 Orchestrator 并应用主题。
+    choreo_id 指定具体编排；不填则使用该音乐最新编排。
+    """
+    if req.music_id not in _music_store:
+        raise HTTPException(404, "music_id not found")
+
+    # 确定使用哪套编排
+    choreo: Dict = {}
+    used_choreo_id = req.choreo_id
+    if used_choreo_id:
+        choreo = _choreo_store.get(used_choreo_id, {})
+    else:
+        choreo = _latest_choreo(req.music_id) or {}
+        used_choreo_id = choreo.get("choreo_id", "")
+
     from app.main import get_orchestrator
     orch = get_orchestrator()
     if orch:
-        # 内存无则尝试从磁盘加载编排
-        choreo = _choreo_store.get(req.music_id)
-        if not choreo:
-            choreo = _load_choreo_from_disk(req.music_id) or {}
-            if choreo:
-                _choreo_store[req.music_id] = choreo
         orch.load_session(
             music_id=req.music_id,
             track=choreo.get("track", []),
             feat=_music_store.get(req.music_id, {}).get("feat", {}),
         )
-        # 应用编排中的主题滤镜
         if orch.compositor:
-            theme_id = choreo.get("theme", "")
-            orch.compositor.set_theme(theme_id)
-    _active_session.update({"music_id": req.music_id, "mode": req.mode})
+            orch.compositor.set_theme(choreo.get("theme", ""))
+
+    _active_session.update({
+        "music_id":  req.music_id,
+        "choreo_id": used_choreo_id,
+        "mode":      req.mode,
+    })
     return {"ok": True, "session": _active_session}
 
 
@@ -455,36 +551,43 @@ async def health():
 # MJPEG 实时视频流（使用 Orchestrator 合成帧：FX + YOLO）
 # ---------------------------------------------------------------------------
 
-def _encode_jpeg(frame: np.ndarray) -> bytes:
-    """在线程池中执行 JPEG 编码（避免阻塞事件循环）。"""
-    _, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+def _make_placeholder_jpg() -> bytes:
+    img = np.zeros((360, 640, 3), dtype=np.uint8)
+    cv2.putText(img, "PicoClaw", (160, 160),
+                cv2.FONT_HERSHEY_SIMPLEX, 2.0, (80, 80, 80), 3)
+    cv2.putText(img, "Initializing...", (190, 210),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (60, 60, 60), 2)
+    _, jpg = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 70])
     return jpg.tobytes()
 
 
 async def _mjpeg_frames(orch):
-    """MJPEG multipart generator：使用 Orchestrator 已合成的帧（含 FX + YOLO 框）。
-    帧由 _frame_loop 已降至 640×360，JPEG 编码移到线程池避免阻塞事件循环。
+    """MJPEG multipart generator。
+
+    _frame_loop 已在线程池中完成渲染+编码，存入 _processed_jpeg。
+    这里只做轮询（10ms）+ 推送，无 CPU 开销，不再额外 to_thread。
+    收到新帧（timestamp 变化）立即发出，消除固定 40ms 等待带来的相位抖动。
     """
-    placeholder = np.zeros((360, 640, 3), dtype=np.uint8)
-    cv2.putText(placeholder, "PicoClaw", (160, 160),
-                cv2.FONT_HERSHEY_SIMPLEX, 2.0, (80, 80, 80), 3)
-    cv2.putText(placeholder, "Initializing...", (190, 210),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (60, 60, 60), 2)
+    placeholder_jpg = _make_placeholder_jpg()
+    last_ts: float = -1.0
 
     while True:
-        display = None
+        jpg_bytes: Optional[bytes] = None
+        ts: float = 0.0
+
         if orch:
-            display = orch.get_processed_frame()
+            jpg_bytes, ts = orch.get_processed_jpeg()
 
-        if display is None:
-            display = placeholder.copy()
+        if jpg_bytes is None:
+            jpg_bytes = placeholder_jpg
 
-        # JPEG 编码移到线程池，避免阻塞 asyncio 事件循环（ARM 上编码 ~5ms）
-        jpg_bytes = await asyncio.to_thread(_encode_jpeg, display)
-        yield (b"--frame\r\n"
-               b"Content-Type: image/jpeg\r\n\r\n"
-               + jpg_bytes + b"\r\n")
-        await asyncio.sleep(0.040)   # ~25fps，与帧处理速率匹配
+        if ts != last_ts:
+            last_ts = ts
+            yield (b"--frame\r\n"
+                   b"Content-Type: image/jpeg\r\n\r\n"
+                   + jpg_bytes + b"\r\n")
+
+        await asyncio.sleep(0.010)  # 10ms 轮询，新帧到来时最多 10ms 延迟
 
 
 @router.get("/video/stream")

@@ -24,6 +24,7 @@ class SegmentPlan(BaseModel):
     name: str
     t_start: float
     t_end: float
+    theme: Optional[str] = ""   # 段落调色主题，覆盖全曲默认主题；留空=沿用全曲主题
     fx: List[FxCommand] = []
     transition_out: Optional[Transition] = None
 
@@ -39,5 +40,6 @@ class ChoreoPlan(BaseModel):
     version: str = "1.0"
     music_id: str
     style: str = "energetic"
+    theme: str = ""             # 全曲默认调色主题（被段落 theme 覆盖）
     director_notes: str = ""
     segments: List[SegmentPlan]

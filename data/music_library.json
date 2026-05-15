@@ -1,0 +1,16 @@
+{
+  "adcc2878f30448519501d43ab1983244": {
+    "path": "/root/pico_view/data/uploads/adcc2878f30448519501d43ab1983244.mp3",
+    "filename": "M500002o5Tzz2ua6XI (1).mp3",
+    "status": "analyzed",
+    "size": 2271452,
+    "sha256": "bcdee62d1093fc731358cc278a586a1ec78c345a695d38ff56eb31996290eaf6",
+    "choreo_ids": [
+      "35fd4c726e954edcaab24ce04b90f1e3",
+      "8514096d047c40528f05c8811fe3e757"
+    ],
+    "tempo": 86.1328125,
+    "duration": 141.87392290249434,
+    "beat_count": 170
+  }
+}

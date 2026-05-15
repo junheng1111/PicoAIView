@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PicoClaw 实时编排系统</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="/static/style.css?v=5">
+    <link rel="stylesheet" href="/static/style.css?v=6">
 </head>
 <body>
     <div class="app-layout">
@@ -111,10 +111,12 @@
                 <div id="taskStatus" class="hint">-</div>
             </section>
 
-            <!-- 编排结果摘要 -->
+            <!-- 编排列表 -->
             <section class="card" id="choreoSummary" style="display:none;">
-                <h3>编排结果</h3>
-                <div id="choreoInfo" class="choreo-info"></div>
+                <h3>编排列表
+                    <button class="btn-icon" onclick="openChoreoDialog()" title="新建编排">＋</button>
+                </h3>
+                <div id="choreoList" class="choreo-list"></div>
             </section>
         </aside>
 
@@ -155,7 +157,29 @@
     </div>
 
     <audio id="audioPlayer" preload="none" style="display:none"></audio>
-    <script src="/static/app.js?v=5"></script>
+
+    <!-- 新建编排对话框 -->
+    <div id="choreoModal" class="modal-overlay hidden">
+        <div class="modal">
+            <h2>✨ 新建编排</h2>
+            <p class="modal-desc">告诉 AI 你想要什么风格（留空则使用 energetic 默认）：</p>
+            <textarea id="styleInput" class="style-textarea" rows="3"
+                placeholder="例：甜美偶像风，副歌要有爆发感，intro 温柔粉色系，间奏可以神秘迷幻…"></textarea>
+            <div class="style-tags">
+                <button class="style-tag" onclick="setStyleTag('动感电音 EDM，高能量，副歌 drop 爆发')">⚡ 动感</button>
+                <button class="style-tag" onclick="setStyleTag('甜美偶像风 J-pop，粉色系，温柔闪亮')">🌸 甜美</button>
+                <button class="style-tag" onclick="setStyleTag('复古 indie 民谣，vintage 褪色感，慵懒')">🌙 复古</button>
+                <button class="style-tag" onclick="setStyleTag('电影感 cinematic teal-orange，商业MV 大气')">🎬 电影感</button>
+                <button class="style-tag" onclick="setStyleTag('赛博朋克 neon 霓虹，夜店电子，科技感')">🌃 夜店</button>
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-secondary" onclick="closeChoreoDialog()">取消</button>
+                <button class="btn btn-accent" onclick="confirmChoreo()">✨ 开始生成</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js?v=6"></script>
 </body>
 </html>
 

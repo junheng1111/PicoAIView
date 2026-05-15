@@ -105,9 +105,11 @@ class FxCompositor:
         vs = self._vision_state
 
         # 0. 主题滤镜（最底层，背景色彩风格）
-        if self._active_theme:
-            result = apply_fx(self._active_theme, result, vision_state=vs,
-                              t=audio_clock, **self._theme_params)
+        # 优先级：段落级 theme_set（区间最窄者）> 全曲 theme_set > set_theme() 全局设置
+        active_theme, active_theme_params = self._resolve_theme(audio_clock)
+        if active_theme:
+            result = apply_fx(active_theme, result, vision_state=vs,
+                              t=audio_clock, **active_theme_params)
 
         # 重置每帧视口（无 subject_zoom 时为全帧）
         self._viewport = (0.0, 0.0, 1.0, 1.0)
@@ -149,6 +151,30 @@ class FxCompositor:
         result = self._apply_live_fx(result, audio_clock, vs)
 
         return result
+
+    def _resolve_theme(self, audio_clock: float):
+        """按音频时间找出当前应用的主题。
+        策略：区间越窄优先级越高（段落 theme_set < 全曲 theme_set < set_theme 全局）。
+        返回 (theme_id, params_dict)。
+        """
+        active_theme  = self._active_theme
+        active_params = self._theme_params
+        best_dur = float("inf")
+
+        for entry in self._continuous_fx:
+            if entry.get("fx") != "theme_set":
+                continue
+            t0 = entry.get("t", 0.0)
+            t1 = entry.get("t_end", float("inf"))
+            if t0 <= audio_clock < t1:
+                dur = t1 - t0
+                if dur < best_dur:
+                    best_dur = dur
+                    active_theme  = entry.get("theme_id", "")
+                    active_params = {k: v for k, v in entry.items()
+                                     if k not in ("t", "t_end", "fx", "continuous", "theme_id")}
+
+        return active_theme, active_params
 
     def mark_beat(self, t: float) -> None:
         """Orchestrator 节拍触发时调用，记录节拍时间用于脉冲 FX。"""

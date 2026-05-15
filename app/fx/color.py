@@ -294,7 +294,8 @@ def _load_cube(path: str):
 
 
 # ---------------------------------------------------------------------------
-# 主题滤镜（category="theme"）—— 持续背景色彩风格，编排中作为全曲基底
+# 主题滤镜（category="theme"）—— 持续背景色彩风格，编排中可按段落切换
+# 可用主题：theme_warm / theme_cool / theme_vintage / theme_neon / theme_cinematic / theme_pink
 # ---------------------------------------------------------------------------
 
 @register_fx(
@@ -373,6 +374,39 @@ def apply_theme_neon(frame: np.ndarray, strength: float = 0.7, **_) -> np.ndarra
     tint[..., 0] = 40 * strength   # B channel boost
     tint[..., 2] = 20 * strength   # R channel boost
     return np.clip(bgr.astype(np.float32) + tint, 0, 255).astype(np.uint8)
+
+
+@register_fx(
+    fx_id="theme_pink",
+    category="theme",
+    latency_tier="light",
+    params={"strength": [0.0, 1.0]},
+    description="粉色樱花主题：玫瑰粉调，梦幻薰衣草高光，偶像/流行/甜系MV适用",
+)
+def apply_theme_pink(frame: np.ndarray, strength: float = 0.7, **_) -> np.ndarray:
+    strength = max(0.0, min(1.0, strength))
+    f32 = frame.astype(np.float32)
+    lum = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+
+    # 阴影：偏玫瑰红（红提、绿微降、蓝降）→ 暗部呈深玫瑰色
+    shadow = (1.0 - lum)[..., np.newaxis]
+    f32[..., 2] += 22 * strength * shadow[..., 0]  # R ↑
+    f32[..., 1] -= 8  * strength * shadow[..., 0]  # G ↓
+    f32[..., 0] -= 6  * strength * shadow[..., 0]  # B ↓
+
+    # 高光：偏薰衣草（红微提、蓝微提）→ 亮部呈粉紫梦幻感
+    high = lum[..., np.newaxis]
+    f32[..., 2] += 10 * strength * high[..., 0]    # R ↑
+    f32[..., 0] += 12 * strength * high[..., 0]    # B ↑
+
+    # 整体轻提亮（甜系高调）
+    f32 *= (1.0 + 0.06 * strength)
+
+    # 全局粉色底层叠加
+    f32[..., 2] += 15 * strength   # R
+    f32[..., 0] += 6  * strength   # B（增加一丝紫味）
+
+    return np.clip(f32, 0, 255).astype(np.uint8)
 
 
 @register_fx(

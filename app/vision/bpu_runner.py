@@ -97,34 +97,60 @@ class _BpuModel:
         self._last_error_ts: float = 0.0
         self._init_lock = threading.Lock()
 
+    # 模型加载超时（秒）：dnn.load() 是 C++ 阻塞调用，BPU 驱动上下文残留时会永久挂死
+    LOAD_TIMEOUT = 12.0
+
     def _ensure_ready(self) -> bool:
         if self._ready:
             return True
         if not _DNN_AVAILABLE:
             return False
         now = time.time()
-        if self._last_error_ts != 0.0 and now - self._last_error_ts < 5.0:
+        if self._last_error_ts != 0.0 and now - self._last_error_ts < 30.0:
             return False
         with self._init_lock:
             if self._ready:
                 return True
+
+            result: list = [None]
+            error:  list = [None]
+
+            def _do_load():
+                try:
+                    result[0] = dnn.load([self.bin_path])
+                except Exception as e:
+                    error[0] = e
+
+            t = threading.Thread(target=_do_load, daemon=True, name="bpu_load")
+            t.start()
+            t.join(timeout=self.LOAD_TIMEOUT)
+
+            if t.is_alive():
+                # dnn.load() 卡住 → BPU 驱动上下文被上次进程占用未释放
+                print(f"[BpuModel] ⚠ 加载超时 ({self.LOAD_TIMEOUT}s): {self.bin_path}")
+                print("[BpuModel] BPU 驱动上下文未释放，服务继续但无 BPU 推理。")
+                print("[BpuModel] 解决方法: bash kill.sh 后重试；若仍卡请 reboot")
+                self._last_error_ts = time.time()
+                return False
+
+            if error[0] is not None:
+                self._last_error_ts = time.time()
+                print(f"[BpuModel] 初始化失败 {self.bin_path}: {error[0]}")
+                return False
+
+            self._models = result[0]
             try:
-                self._models = dnn.load([self.bin_path])
                 props = self._models[0].inputs[0].properties
                 if hasattr(props, "valid_shape"):
                     shape = props.valid_shape
                     if len(shape) == 4:
                         self._input_h = int(shape[1]) if shape[1] > 3 else int(shape[2])
                         self._input_w = int(shape[2]) if shape[1] > 3 else int(shape[3])
-                self._ready = True
-                print(f"[BpuModel] 加载成功: {self.bin_path}  输入 {self._input_h}×{self._input_w}")
-                return True
-            except Exception as e:
-                self._last_error_ts = time.time()
-                self._ready = False
-                self._models = None
-                print(f"[BpuModel] 初始化失败 {self.bin_path}: {e}")
-                return False
+            except Exception:
+                pass
+            self._ready = True
+            print(f"[BpuModel] 加载成功: {self.bin_path}  输入 {self._input_h}×{self._input_w}")
+            return True
 
     def _preprocess_nv12(self, frame_bgr: np.ndarray) -> np.ndarray:
         """BGR → NV12，RDK X5 Bayese 系列模型要求 NV12 输入。"""
@@ -139,16 +165,35 @@ class _BpuModel:
         return nv12[np.newaxis, ...]
 
     def forward(self, frame_bgr: np.ndarray):
-        """执行推理，返回原始 outputs 列表，推理失败返回 None。"""
+        """执行推理，返回原始 outputs 列表，推理失败返回 None。
+
+        锁只用于保护 _models 引用的获取，推理本身在锁外执行，
+        确保 close() 可以在推理进行中安全运行而不死锁。
+        """
         with self._lock:
             if not self._ensure_ready() or self._models is None:
                 return None
-            inp = self._preprocess_nv12(frame_bgr)
-            try:
-                return self._models[0].forward(inp)
-            except Exception as e:
-                print(f"[BpuModel] forward 失败 {self.bin_path}: {e}")
-                return None
+            models_ref = self._models   # 取引用后立即释放锁
+
+        inp = self._preprocess_nv12(frame_bgr)
+        try:
+            return models_ref[0].forward(inp)
+        except Exception as e:
+            print(f"[BpuModel] forward 失败 {self.bin_path}: {e}")
+            return None
+
+    def close(self) -> None:
+        """显式释放 BPU 模型资源（必须在推理线程停止后调用）。"""
+        with self._lock:
+            if self._models is not None:
+                try:
+                    # horizon_dnn 没有显式 close()，靠 del 触发 C++ 析构释放 BPU 上下文
+                    del self._models
+                except Exception:
+                    pass
+                self._models = None
+                self._ready = False
+                print(f"[BpuModel] 已释放: {self.bin_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -287,51 +332,128 @@ def _parse_detections(
     return sorted(dets, key=lambda d: -d.confidence)
 
 
-def _parse_pose(outputs) -> List[PoseDetection]:
-    """解析姿态模型输出。
-    
-    预期格式：
-    outputs[0].buffer: [1, num_det, 6]  (bbox + score + cls)
-    outputs[1].buffer: [1, num_det, 17, 3] (x, y, score 归一化)
-    若模型只有一个输出，则降级返回无关键点的 PoseDetection。
+def _to_hwc(arr: np.ndarray) -> np.ndarray:
+    """将任意 batch 维布局的 buffer 规整为 (H, W, C)。
+    支持 (1,H,W,C)、(H,W,C)、(1,H,W)、(H,W) 等常见 hobot_dnn 输出形状。
     """
-    if outputs is None:
+    # 去掉 batch=1 维（只去首维）
+    if arr.ndim == 4 and arr.shape[0] == 1:
+        arr = arr[0]          # → (H, W, C)
+    elif arr.ndim == 3 and arr.shape[0] == 1:
+        arr = arr[0]          # → (W, C) — 不常见，但安全
+    # 如果 cls head 是 (H, W)，补回 channel 维
+    if arr.ndim == 2:
+        arr = arr[:, :, np.newaxis]   # → (H, W, 1)
+    return arr
+
+
+def _parse_pose(
+    outputs,
+    conf_th: float = 0.20,
+    iou_th:  float = 0.45,
+    input_hw: Tuple[int, int] = (640, 640),
+    _debug: bool = False,
+) -> List[PoseDetection]:
+    """解析 YOLOv8-pose 原始 9-head 输出（无 on-chip NMS）。
+
+    outputs[0/3/6]: (1, H, W, 1)  person 置信度 logit   (P3/P4/P5)
+    outputs[1/4/7]: (1, H, W, 64) DFL box encoding
+    outputs[2/5/8]: (1, H, W, 51) 17 关键点 × 3 (x_off, y_off, vis_logit)
+    关键点解码：kpt_x = (col + x_off) * stride  (像素)
+    """
+    if outputs is None or len(outputs) < 9:
+        if outputs is not None:
+            print(f"[_parse_pose] ⚠ 输出 {len(outputs)} 个 head，需要 9 个，无法解析。"
+                  f" shapes: {[np.array(o.buffer).shape for o in outputs]}")
         return []
 
-    det_buf = np.array(outputs[0].buffer).squeeze()
-    if det_buf.ndim == 1:
-        det_buf = det_buf[np.newaxis, :]
+    if _debug:
+        print(f"[_parse_pose] 诊断: {len(outputs)} heads")
+        for i, o in enumerate(outputs):
+            buf = np.array(o.buffer)
+            kpt_note = " ← kpt head (x/y offset range)" if (i % 3 == 2) else ""
+            print(f"  [{i}] raw_shape={buf.shape}  max={buf.max():.4f}  min={buf.min():.4f}{kpt_note}")
 
-    has_kpts = len(outputs) > 1
-    if has_kpts:
-        kpt_buf = np.array(outputs[1].buffer).squeeze()  # (num_det, 17, 3)
-        if kpt_buf.ndim == 2:
-            kpt_buf = kpt_buf[np.newaxis, ...]
+    ih, iw = input_hw
+    all_boxes:  List[np.ndarray] = []
+    all_scores: List[np.ndarray] = []
+    all_kpts:   List[np.ndarray] = []
 
+    for ci, bi, ki, stride in ((0, 1, 2, 8), (3, 4, 5, 16), (6, 7, 8, 32)):
+        cls_buf = _to_hwc(np.array(outputs[ci].buffer))   # (H, W, 1)
+        box_buf = _to_hwc(np.array(outputs[bi].buffer))   # (H, W, 64)
+        kpt_buf = _to_hwc(np.array(outputs[ki].buffer))   # (H, W, 51)
+
+        if box_buf.ndim != 3 or box_buf.shape[-1] != 64:
+            if _debug:
+                print(f"  scale stride={stride}: unexpected box shape {box_buf.shape}, skip")
+            continue
+
+        H, W = box_buf.shape[:2]
+        scores = 1.0 / (1.0 + np.exp(-np.clip(cls_buf.reshape(-1), -20, 20)))
+
+        if _debug:
+            kraw_all = kpt_buf.reshape(-1, 17, 3)
+            print(f"  stride={stride:2d}: HW=({H},{W})  max_score={scores.max():.4f}  "
+                  f"above_{conf_th}={scores[scores > conf_th].size}  "
+                  f"kraw_xy=[{kraw_all[..., :2].min():.2f}, {kraw_all[..., :2].max():.2f}]")
+        mask   = scores > conf_th
+        if not mask.any():
+            continue
+
+        ys, xs = np.meshgrid(np.arange(H), np.arange(W), indexing='ij')
+        col_m = xs.reshape(-1)[mask]
+        row_m = ys.reshape(-1)[mask]
+        cx_m  = (col_m + 0.5) * stride
+        cy_m  = (row_m + 0.5) * stride
+
+        ltrb = _dfl_decode(box_buf.reshape(-1, 64)[mask]) * stride
+        x1 = np.clip((cx_m - ltrb[:, 0]) / iw, 0.0, 1.0)
+        y1 = np.clip((cy_m - ltrb[:, 1]) / ih, 0.0, 1.0)
+        x2 = np.clip((cx_m + ltrb[:, 2]) / iw, 0.0, 1.0)
+        y2 = np.clip((cy_m + ltrb[:, 3]) / ih, 0.0, 1.0)
+
+        kraw = kpt_buf.reshape(-1, 17, 3)[mask]        # (M, 17, 3)
+        # kraw[:, :, 0/1] 是相对于检测格子角点的偏移（格子单位，非像素）
+        # 例：kraw_x=5 stride=8 → 向右偏移 5 格 = 40像素
+        # 锚点中心用 col+0.5 / row+0.5 表示格子中心（而非角点）
+        kx = np.clip((col_m[:, None] + 0.5 + kraw[:, :, 0]) * stride / iw, 0.0, 1.0)
+        ky = np.clip((row_m[:, None] + 0.5 + kraw[:, :, 1]) * stride / ih, 0.0, 1.0)
+        kv = 1.0 / (1.0 + np.exp(-np.clip(kraw[:, :, 2], -20, 20)))
+
+        all_boxes.append(np.stack([x1, y1, x2, y2], axis=1))
+        all_scores.append(scores[mask])
+        all_kpts.append(np.stack([kx, ky, kv], axis=-1))   # (M, 17, 3)
+
+    if not all_boxes:
+        return []
+
+    boxes  = np.concatenate(all_boxes,  axis=0)
+    scores = np.concatenate(all_scores, axis=0)
+    kpts   = np.concatenate(all_kpts,   axis=0)
+
+    keep = _nms_cpu(boxes, scores, iou_th)
     result: List[PoseDetection] = []
-    for i, row in enumerate(det_buf):
-        if len(row) < 6:
+    for k in keep:
+        x1, y1, x2, y2 = boxes[k]
+        w_box = float(x2 - x1)
+        h_box = float(y2 - y1)
+        if w_box <= 0 or h_box <= 0:
             continue
-        x1, y1, x2, y2, score, cls = float(row[0]), float(row[1]), float(row[2]), \
-                                      float(row[3]), float(row[4]), int(row[5])
-        if score < 0.25 or cls != COCO_PERSON_CLASS_ID:
-            continue
-
-        w, h_box = x2 - x1, y2 - y1
-        det = Detection(label="person", confidence=score,
-                        bbox=(max(0.0, x1), max(0.0, y1),
-                              max(0.0, w), max(0.0, h_box)),
-                        class_id=COCO_PERSON_CLASS_ID)
-
-        keypoints: List[Keypoint] = []
-        if has_kpts and i < kpt_buf.shape[0]:
-            for kp in kpt_buf[i]:  # (17, 3)
-                keypoints.append(Keypoint(x=float(kp[0]), y=float(kp[1]),
-                                          score=float(kp[2])))
-
+        det = Detection(
+            label="person", confidence=float(scores[k]),
+            bbox=(float(x1), float(y1), w_box, h_box),
+            class_id=COCO_PERSON_CLASS_ID,
+        )
+        keypoints = [
+            Keypoint(x=float(kpts[k, j, 0]),
+                     y=float(kpts[k, j, 1]),
+                     score=float(kpts[k, j, 2]))
+            for j in range(17)
+        ]
         result.append(PoseDetection(detection=det, keypoints=keypoints))
 
-    return result
+    return sorted(result, key=lambda p: -p.detection.confidence)
 
 
 # ---------------------------------------------------------------------------
@@ -365,14 +487,14 @@ class BpuRunner:
         self._prev_gray: Optional[np.ndarray] = None
 
         # 活跃模型集合（运行时可动态变更）
-        self._active_models: set = {self.MODEL_DETECT, self.MODEL_POSE}
+        self._active_models: set = {self.MODEL_POSE}
         self._model_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # 公开 API
     # ------------------------------------------------------------------
 
-    def start(self, detect_bin: str, pose_bin: str,
+    def start(self, detect_bin: Optional[str] = None, pose_bin: str = "",
               seg_bin: Optional[str] = None,
               depth_bin: Optional[str] = None,
               face_bin: Optional[str] = None) -> None:
@@ -394,9 +516,15 @@ class BpuRunner:
         print("[BpuRunner] 后台推理线程已启动")
 
     def stop(self) -> None:
+        """停止推理线程并显式释放所有 BPU 模型资源。"""
         self._running = False
         if self._thread:
-            self._thread.join(timeout=2.0)
+            self._thread.join(timeout=3.0)   # 等待推理线程退出
+        # 推理线程已停止，安全地释放所有模型
+        for key, model in list(self._models.items()):
+            model.close()
+        self._models.clear()
+        print("[BpuRunner] 所有 BPU 资源已释放")
 
     def vision_state(self) -> VisionState:
         """线程安全地读取最新 VisionState（FX Compositor 调用）。"""
@@ -425,8 +553,15 @@ class BpuRunner:
 
     _latest_frame: Optional[np.ndarray] = None
 
+    _debug_log_interval: float = 5.0   # 每隔 N 秒打印一次检测统计
+
     def _infer_loop(self) -> None:
         last_ts = 0.0
+        last_log_ts = 0.0
+        frame_count = 0
+        det_count = 0
+        first_inference = True   # 首次成功推理时打印诊断
+
         while self._running:
             frame = self._latest_frame
             if frame is None:
@@ -445,15 +580,31 @@ class BpuRunner:
             dets: List[Detection] = []
             poses: List[PoseDetection] = []
 
-            # 检测
-            if self.MODEL_DETECT in active and self.MODEL_DETECT in self._models:
-                outputs = self._models[self.MODEL_DETECT].forward(frame)
-                dets = _parse_detections(outputs, conf_th=0.25)
-
-            # 姿态
+            # 姿态（优先；pose 结果里已含 person bbox，无需再跑 detect）
             if self.MODEL_POSE in active and self.MODEL_POSE in self._models:
                 outputs = self._models[self.MODEL_POSE].forward(frame)
-                poses = _parse_pose(outputs)
+                if outputs is None:
+                    if now - last_log_ts > self._debug_log_interval:
+                        print("[BpuRunner] pose forward() 返回 None，推理失败")
+                        last_log_ts = now
+                else:
+                    if first_inference:
+                        first_inference = False
+                        poses = _parse_pose(outputs, _debug=True)
+                    else:
+                        poses = _parse_pose(outputs)
+                    dets  = [p.detection for p in poses]
+
+            frame_count += 1
+            det_count += len(poses)
+            if now - last_log_ts > self._debug_log_interval:
+                fps_est = frame_count / max(1, now - (last_log_ts or now - 1))
+                print(f"[BpuRunner] {fps_est:.1f} fps | "
+                      f"检测到 pose: {len(poses)} 人 | "
+                      f"累计 {det_count}/{frame_count} 帧有人")
+                last_log_ts = now
+                frame_count = 0
+                det_count = 0
 
             # motion intensity（帧差均值）
             motion = 0.0
@@ -497,5 +648,16 @@ class BpuRunner:
                     "class_id": d.class_id,
                 }
                 for d in vs.detections
+            ],
+            "poses": [
+                {
+                    "confidence": round(p.detection.confidence, 3),
+                    "bbox": [round(v, 4) for v in p.detection.bbox],
+                    "keypoints": [
+                        [round(kp.x, 4), round(kp.y, 4), round(kp.score, 3)]
+                        for kp in p.keypoints
+                    ],
+                }
+                for p in vs.pose_detections
             ],
         }

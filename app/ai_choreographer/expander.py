@@ -13,6 +13,9 @@ def expand_plan_to_track(plan: ChoreoPlan, feat: Dict[str, Any]) -> List[Dict[st
     """
     把 LLM 输出的段落级 plan 展开成逐时间点的 ChoreoTrack。
     每个 entry：{"t": float, "fx": str, **params}
+
+    主题切换：每个有 theme 的段落生成一个 theme_set 连续事件；
+    全曲默认 theme 生成 t=0 覆盖全程的事件（被段落事件优先覆盖）。
     """
     beats = feat.get("beats", [])
     downbeats = feat.get("downbeats", [])
@@ -20,8 +23,24 @@ def expand_plan_to_track(plan: ChoreoPlan, feat: Dict[str, Any]) -> List[Dict[st
 
     track: List[Dict[str, Any]] = []
 
+    # 全曲默认主题（段落级 theme_set 会在同区间内被优先选择）
+    if plan.theme:
+        track.append({
+            "t": 0.0, "t_end": float("inf"),
+            "fx": "theme_set", "theme_id": plan.theme,
+            "continuous": True,
+        })
+
     for seg in plan.segments:
         t0, t1 = seg.t_start, seg.t_end
+
+        # 段落级主题切换（精确区间，优先级高于全曲默认）
+        if seg.theme:
+            track.append({
+                "t": t0, "t_end": t1,
+                "fx": "theme_set", "theme_id": seg.theme,
+                "continuous": True,
+            })
 
         for fx_cmd in seg.fx:
             trigger = fx_cmd.trigger

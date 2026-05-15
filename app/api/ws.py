@@ -103,7 +103,5 @@ async def broadcast_vision(vs) -> None:
     from app.vision.bpu_runner import BpuRunner
     await manager.broadcast({
         "type": "vision",
-        "t": round(vs.timestamp, 3),
-        "subjects": vs.subject_count,
-        "primary_id": vs.primary_id,
+        **BpuRunner.serialize_state(vs),
     })

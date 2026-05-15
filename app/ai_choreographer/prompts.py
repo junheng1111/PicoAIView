@@ -22,11 +22,24 @@ SYSTEM_PROMPT = """\
    - 不能在相邻两段都使用同一模型；连续使用同一重型模型不超过 60 秒。
 7. 排除清单中的 fx（标 excluded=true）不能出现在 plan 中。
 
+【调色主题（theme）】
+每首曲目有一个全曲默认主题（ChoreoPlan.theme），每个段落可通过 SegmentPlan.theme 单独覆盖。
+主题只能从以下列表选择，留空 "" 表示无主题：
+  theme_warm      暖色金橙，RnB/流行
+  theme_cool      冷色青蓝，EDM/电子
+  theme_vintage   复古褪色，民谣/indie
+  theme_neon      霓虹赛博，夜店/电子
+  theme_cinematic 电影 teal-orange，商业MV
+  theme_pink      粉色樱花玫瑰粉，偶像/甜系/J-pop
+
 【软偏好】
-1. 副歌 / drop 段：优先选 ai_aware 类 fx + 1 个 glitch shader。
-2. intro / outro：调色（3d_lut、duotone、vignette）+ 1 个轻几何。
-3. bridge：时间域（echo_trails）+ depth_dof，制造反差。
-4. 静音段（energy=low）：fx 总数 ≤ 1。
+1. 副歌 / drop 段：优先选 ai_aware 类 fx + 1 个 glitch shader；主题可切换到高饱和（neon/cinematic）。
+2. intro / outro：调色（3d_lut、duotone、vignette）+ 1 个轻几何；intro 适合 vintage/pink 暖入。
+3. bridge：时间域（echo_trails）+ depth_dof，制造反差；可切换到 cool/cinematic 制造情绪落差。
+4. 静音段（energy=low）：fx 总数 ≤ 1；考虑切到 vintage 或 pink 增加柔美感。
+5. 不同段落尽量使用不同 theme 形成对比，避免全曲统一主题显得单调。
+6. pink_halo（overlay/medium）：粉晕综合特效，三层脉冲晕圈+旋转弧+粒子+核心发光+暗角；
+   强烈推荐搭配 theme_pink，适合副歌高能段和偶像/甜系/J-pop 风格；trigger=continuous。
 """
 
 
@@ -74,6 +87,9 @@ def build_user_prompt(feat: Dict[str, Any], fx_catalog: List[Dict],
 
 
 # ChoreoPlan JSON Schema（用于 Claude tool / OpenAI json_schema）
+_THEME_ENUM = ["", "theme_warm", "theme_cool", "theme_vintage",
+               "theme_neon", "theme_cinematic", "theme_pink"]
+
 CHOREO_PLAN_SCHEMA = {
     "type": "object",
     "required": ["version", "music_id", "style", "segments"],
@@ -81,6 +97,8 @@ CHOREO_PLAN_SCHEMA = {
         "version": {"type": "string"},
         "music_id": {"type": "string"},
         "style": {"type": "string"},
+        "theme": {"type": "string", "enum": _THEME_ENUM,
+                  "description": "全曲默认调色主题，被各段落 theme 覆盖"},
         "director_notes": {"type": "string"},
         "segments": {
             "type": "array",
@@ -91,6 +109,8 @@ CHOREO_PLAN_SCHEMA = {
                     "name": {"type": "string"},
                     "t_start": {"type": "number"},
                     "t_end": {"type": "number"},
+                    "theme": {"type": "string", "enum": _THEME_ENUM,
+                              "description": "段落调色主题，覆盖全曲默认；留空沿用全曲主题"},
                     "fx": {
                         "type": "array",
                         "maxItems": 4,

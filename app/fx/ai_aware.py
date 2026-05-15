@@ -299,6 +299,105 @@ def apply_depth_dof(frame: np.ndarray, strength: float = 0.5,
 
 
 # ---------------------------------------------------------------------------
+# 柔和主体漂移（AI-aware 舒缓运镜）
+# ---------------------------------------------------------------------------
+
+_DRIFT_CX: float = 0.5
+_DRIFT_CY: float = 0.5
+
+
+@register_fx(
+    fx_id="subject_drift",
+    category="ai_aware",
+    latency_tier="light",
+    depends_on=["yolov8s"],
+    params={"smooth": [0.9, 0.99], "amp": [0.02, 0.12]},
+    description="柔和主体漂移：超低 EMA 跟随主体做 pan，比 subject_track 慢 10 倍，全程持续挂",
+)
+def apply_subject_drift(frame: np.ndarray, smooth: float = 0.97,
+                        amp: float = 0.06, vision_state=None, **_) -> np.ndarray:
+    global _DRIFT_CX, _DRIFT_CY
+    h, w = frame.shape[:2]
+
+    target_cx, target_cy = 0.5, 0.5
+    if vision_state is not None:
+        pb = (vision_state.primary_bbox()
+              if hasattr(vision_state, "primary_bbox") else None)
+        if pb:
+            target_cx = pb[0] + pb[2] / 2.0
+            target_cy = pb[1] + pb[3] / 2.0
+
+    alpha = 1.0 - smooth
+    _DRIFT_CX = smooth * _DRIFT_CX + alpha * target_cx
+    _DRIFT_CY = smooth * _DRIFT_CY + alpha * target_cy
+
+    # 将主体中心缓慢拉向画面中心方向（负偏移 = 向画面中心平移）
+    dx = int((_DRIFT_CX - 0.5) * amp * w)
+    dy = int((_DRIFT_CY - 0.5) * amp * h)
+    M = np.float32([[1, 0, -dx], [0, 1, -dy]])
+    return cv2.warpAffine(frame, M, (w, h), borderMode=cv2.BORDER_REFLECT_101)
+
+
+# ---------------------------------------------------------------------------
+# 粒子跟手势（DESIGN.md §4.2 pose_particles）
+# ---------------------------------------------------------------------------
+
+_PART_LIST: list = []   # [(x, y, vx, vy, alpha)]
+_MAX_PARTS: int = 120
+
+
+@register_fx(
+    fx_id="pose_particles",
+    category="ai_aware",
+    latency_tier="medium",
+    depends_on=["yolov8s_pose"],
+    params={"rate": [0.5, 3.0], "decay": [0.80, 0.98], "color": "hex"},
+    description="粒子跟手势：从腕/踝关键点发射上浮粒子，drop/onset 触发，动感十足",
+)
+def apply_pose_particles(frame: np.ndarray, rate: float = 1.5, decay: float = 0.92,
+                         color: str = "#ff4488", vision_state=None, **_) -> np.ndarray:
+    global _PART_LIST
+    import random
+    h, w = frame.shape[:2]
+    result = frame.copy().astype(np.float32)
+    c = np.array(_hex_bgr(color), dtype=np.float32)
+
+    # 物理更新
+    updated = []
+    for x, y, vx, vy, alpha in _PART_LIST:
+        x += vx
+        y += vy
+        vy -= 0.0015          # 上浮
+        alpha *= decay
+        if alpha > 0.04 and 0.0 <= x <= 1.0 and 0.0 <= y <= 1.0:
+            updated.append((x, y, vx, vy, alpha))
+    _PART_LIST = updated
+
+    # 从关键点发射新粒子（手腕 9/10、脚踝 15/16）
+    if vision_state is not None and len(_PART_LIST) < _MAX_PARTS:
+        for pd in vision_state.pose_detections:
+            for idx in (9, 10, 15, 16):
+                if idx >= len(pd.keypoints):
+                    continue
+                kp = pd.keypoints[idx]
+                if kp.score < 0.3:
+                    continue
+                for _ in range(max(1, int(rate))):
+                    vx = random.uniform(-0.007, 0.007)
+                    vy = random.uniform(-0.011, -0.003)
+                    _PART_LIST.append((kp.x, kp.y, vx, vy, 1.0))
+
+    # 渲染
+    for x, y, vx, vy, alpha in _PART_LIST:
+        px, py = int(x * w), int(y * h)
+        if 0 <= px < w and 0 <= py < h:
+            radius = max(2, int(alpha * 7))
+            cv2.circle(result, (px, py), radius, (c * alpha).tolist(), -1, cv2.LINE_AA)
+
+    return np.clip(result, 0, 255).astype(np.uint8)
+
+
+# ---------------------------------------------------------------------------
 # 工具
 # ---------------------------------------------------------------------------
 

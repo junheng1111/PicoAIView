@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import bisect
+import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
 
@@ -18,49 +19,121 @@ from app.media.camera import CameraSource
 from app.vision.bpu_runner import BpuRunner
 
 
+# COCO 17关键点骨架连接（左侧绿，右侧蓝，躯干白）
+_SKELETON = [
+    (0, 1), (0, 2), (1, 3), (2, 4),            # 头部
+    (5, 7), (7, 9),                              # 左臂
+    (6, 8), (8, 10),                             # 右臂
+    (5, 6), (5, 11), (6, 12), (11, 12),          # 躯干
+    (11, 13), (13, 15),                          # 左腿
+    (12, 14), (14, 16),                          # 右腿
+]
+_SKEL_COLOR = [
+    (0, 255, 128), (0, 255, 128), (0, 255, 128), (0, 255, 128),
+    (0, 255, 0),   (0, 255, 0),
+    (255, 128, 0), (255, 128, 0),
+    (255, 255, 255), (255, 255, 255), (255, 255, 255), (255, 255, 255),
+    (0, 200, 255), (0, 200, 255),
+    (128, 0, 255), (128, 0, 255),
+]
+_KPT_COLOR = [
+    (0,255,128),(0,255,128),(0,255,128),(0,255,128),(0,255,128),
+    (0,255,0),(255,128,0),
+    (0,255,0),(255,128,0),
+    (0,255,0),(255,128,0),
+    (0,200,255),(128,0,255),
+    (0,200,255),(128,0,255),
+    (0,200,255),(128,0,255),
+]
+
+
+
+_MODEL_INPUT_W = 640   # YOLO 模型输入宽度
+_MODEL_INPUT_H = 640   # YOLO 模型输入高度
+
+
+def _draw_pose_overlay(frame: np.ndarray, vs,
+                       src_w: int = 1280, src_h: int = 720) -> np.ndarray:
+    """在帧上绘制 pose 骨架 + 关键点。
+
+    坐标映射链：
+      YOLO 输入 (640×640, 拉伸自 src_w×src_h)
+        → kp.x = model_x / 640  ≡ src_x / src_w
+        → kp.y = model_y / 640  ≡ src_y / src_h
+      显示帧 (disp_w × disp_h, 等比缩放自 src_w×src_h)
+        → x_disp = kp.x × disp_w  (拉伸因子抵消，等比缩放因子保留)
+        → y_disp = kp.y × disp_h
+    """
+    if not vs or not vs.pose_detections:
+        return frame
+
+    disp_h, disp_w = frame.shape[:2]
+    VIS_TH = 0.3
+
+    for pose in vs.pose_detections:
+        kpts = pose.keypoints
+
+        # 归一化坐标 → 显示像素（kp.x/kp.y 已等价于 src 归一化坐标）
+        kpx = [
+            (int(kp.x * disp_w), int(kp.y * disp_h), kp.score)
+            for kp in kpts
+        ]
+
+        # 骨架连线
+        for idx, (a, b) in enumerate(_SKELETON):
+            if a >= len(kpx) or b >= len(kpx):
+                continue
+            ax, ay, av = kpx[a]
+            bx, by, bv = kpx[b]
+            if av < VIS_TH or bv < VIS_TH:
+                continue
+            if not (0 <= ax < disp_w and 0 <= ay < disp_h
+                    and 0 <= bx < disp_w and 0 <= by < disp_h):
+                continue
+            cv2.line(frame, (ax, ay), (bx, by), _SKEL_COLOR[idx], 2, cv2.LINE_AA)
+
+        # 关键点圆点
+        for j, (kx, ky, vis) in enumerate(kpx):
+            if vis < VIS_TH or not (0 <= kx < disp_w and 0 <= ky < disp_h):
+                continue
+            color = _KPT_COLOR[j] if j < len(_KPT_COLOR) else (255, 255, 255)
+            cv2.circle(frame, (kx, ky), 4, color, -1, cv2.LINE_AA)
+
+    return frame
+
+
 def _render_frame(frame: np.ndarray, compositor, t: float, vs) -> np.ndarray:
-    """在线程池中执行帧渲染（CPU 密集，不阻塞 asyncio 事件循环）。"""
-    # 降分辨率加速处理：640×360 比 1280×720 快 4x，对显示质量影响极小
-    h, w = frame.shape[:2]
-    if w > 640:
+    """渲染一帧：缩放 → pose 骨架 → FX Compositor → HUD。"""
+    src_h, src_w = frame.shape[:2]
+    if src_w > 640:
         proc = cv2.resize(frame, (640, 360), interpolation=cv2.INTER_LINEAR)
     else:
         proc = frame.copy()
+
+    if vs:
+        # 传入源帧尺寸，供坐标映射注释用（实际计算直接用 disp_w/disp_h）
+        proc = _draw_pose_overlay(proc, vs, src_w=src_w, src_h=src_h)
 
     try:
         processed = compositor.process(proc, t)
     except Exception:
         processed = proc
 
-    # 叠加 YOLO 检测框（需通过 compositor 的 viewport 做坐标变换）
-    if vs and vs.detections:
-        ph, pw = processed.shape[:2]
-        # 获取 subject_zoom 视口（left_norm, top_norm, w_norm, h_norm）
-        vl, vt, vw, vh = compositor.get_viewport() if hasattr(compositor, 'get_viewport') else (0.0, 0.0, 1.0, 1.0)
-        for det in vs.detections:
-            ox, oy, obw, obh = det.bbox  # 原始归一化坐标
-            # 将原始坐标变换到当前显示空间
-            dx  = (ox  - vl) / vw
-            dy  = (oy  - vt) / vh
-            dw  = obw / vw
-            dh  = obh / vh
-            x1, y1 = int(dx * pw),        int(dy * ph)
-            x2, y2 = int((dx + dw) * pw), int((dy + dh) * ph)
-            # 裁剪到帧边界
-            x1, y1 = max(0, x1), max(0, y1)
-            x2, y2 = min(pw - 1, x2), min(ph - 1, y2)
-            if x2 <= x1 or y2 <= y1:
-                continue
-            color = (0, 255, 64) if det.label == "person" else (0, 165, 255)
-            cv2.rectangle(processed, (x1, y1), (x2, y2), color, 2)
-            label_txt = f"{det.label} {det.confidence:.2f}"
-            cv2.putText(processed, label_txt, (x1, max(y1 - 6, 14)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
-        if vs.subject_count > 0:
-            cv2.putText(processed, f"Persons: {vs.subject_count}",
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 64), 2)
+    if vs and vs.subject_count > 0:
+        ph2, pw2 = processed.shape[:2]
+        cv2.putText(processed, f"Persons: {vs.subject_count}",
+                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 64), 2)
 
     return processed
+
+
+def _render_and_encode(frame: np.ndarray, compositor, t: float, vs):
+    """渲染 + JPEG 编码，在同一线程池调用中完成，避免二次 to_thread 开销。
+    返回 (rendered_ndarray, jpeg_bytes)。
+    """
+    rendered = _render_frame(frame, compositor, t, vs)
+    _, jpg = cv2.imencode(".jpg", rendered, [cv2.IMWRITE_JPEG_QUALITY, 70])
+    return rendered, jpg.tobytes()
 
 
 class Orchestrator:
@@ -95,15 +168,20 @@ class Orchestrator:
         self._session_running: bool = False
         self._handlers: Dict[str, List[Callable]] = {}
 
-        # 最新合成帧（供 MJPEG 流消费）
+        # 最新合成帧 + 预编码 JPEG（供 MJPEG 流消费）
         self._processed_frame: Optional[np.ndarray] = None
-        self._processed_lock = __import__('threading').Lock()
+        self._processed_jpeg:  Optional[bytes] = None
+        self._processed_ts:    float = 0.0
+        self._processed_lock = threading.Lock()
 
-        # 状态推送任务
+        # asyncio 任务
         self._status_task: Optional[asyncio.Task] = None
-        self._beat_task: Optional[asyncio.Task] = None
+        self._beat_task:   Optional[asyncio.Task] = None
         self._vision_task: Optional[asyncio.Task] = None
-        self._frame_task: Optional[asyncio.Task] = None
+
+        # 专用渲染线程（完全脱离 asyncio 事件循环）
+        self._render_thread: Optional[threading.Thread] = None
+        self._render_running: bool = False
 
         self._last_fps_ts: float = 0.0
         self._frame_count: int = 0
@@ -113,9 +191,13 @@ class Orchestrator:
     # ------------------------------------------------------------------
 
     def get_processed_frame(self) -> Optional[np.ndarray]:
-        """返回最近一帧合成后的图像（YOLO框 + FX），供 MJPEG 流使用。"""
         with self._processed_lock:
             return self._processed_frame.copy() if self._processed_frame is not None else None
+
+    def get_processed_jpeg(self):
+        """返回 (jpeg_bytes, timestamp)，MJPEG 流用 timestamp 判断是否有新帧。"""
+        with self._processed_lock:
+            return self._processed_jpeg, self._processed_ts
 
     def setup(self, camera: CameraSource, bpu_runner: BpuRunner,
               compositor: FxCompositor) -> None:
@@ -190,7 +272,13 @@ class Orchestrator:
         self._status_task = asyncio.ensure_future(self._status_loop())
         self._beat_task   = asyncio.ensure_future(self._beat_loop())
         self._vision_task = asyncio.ensure_future(self._vision_loop())
-        self._frame_task  = asyncio.ensure_future(self._frame_loop())
+
+        # 独立渲染线程：完全脱离 asyncio 事件循环，避免 to_thread 竞争
+        self._render_running = True
+        self._render_thread = threading.Thread(
+            target=self._render_thread_fn, daemon=True, name="render"
+        )
+        self._render_thread.start()
 
     async def _status_loop(self) -> None:
         """每秒推送 status 到 WS。"""
@@ -229,7 +317,7 @@ class Orchestrator:
         last_down_idx = 0
 
         while True:
-            await asyncio.sleep(0.005)   # 5ms 轮询
+            await asyncio.sleep(0.015)   # 15ms 轮询（渲染已移至独立线程）
             if not self._session_running:
                 continue
 
@@ -271,23 +359,24 @@ class Orchestrator:
             except Exception:
                 pass
 
-    async def _frame_loop(self) -> None:
-        """主帧处理循环：读帧 → BPU → FX Compositor（线程池执行，不阻塞事件循环）。"""
+    def _render_thread_fn(self) -> None:
+        """独立渲染线程：读帧 → BPU 推帧 → FX Compositor → JPEG 编码。
+        完全使用 time.sleep，不依赖 asyncio，避免阻塞事件循环。
+        """
         FRAME_INTERVAL = 0.040  # 25fps 上限
 
-        while True:
+        while self._render_running:
             frame_start = time.monotonic()
 
             if not self.camera or not self.compositor:
-                await asyncio.sleep(0.01)
+                time.sleep(0.01)
                 continue
 
             frame = self.camera.get_frame()
             if frame is None:
-                await asyncio.sleep(0.005)
+                time.sleep(0.005)
                 continue
 
-            # 推帧给 BPU 异步推理（仅入队，不阻塞）
             if self.bpu_runner:
                 self.bpu_runner.push_frame(frame)
 
@@ -296,24 +385,21 @@ class Orchestrator:
             if vs and not self._session_running:
                 self.compositor.current_rms = vs.motion_intensity
 
-            compositor = self.compositor
             try:
-                # FX 处理移到线程池，避免阻塞 asyncio 事件循环
-                processed = await asyncio.to_thread(
-                    _render_frame, frame, compositor, t, vs
-                )
+                processed, jpg_bytes = _render_and_encode(frame, self.compositor, t, vs)
                 with self._processed_lock:
                     self._processed_frame = processed
+                    self._processed_jpeg  = jpg_bytes
+                    self._processed_ts    = time.monotonic()
             except Exception:
                 with self._processed_lock:
                     self._processed_frame = frame
 
             self._frame_count += 1
 
-            # 控制帧率
             elapsed = time.monotonic() - frame_start
             wait = max(0.001, FRAME_INTERVAL - elapsed)
-            await asyncio.sleep(wait)
+            time.sleep(wait)
 
     def _fps(self) -> float:
         now = time.monotonic()

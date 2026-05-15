@@ -74,6 +74,70 @@ def apply_shake(frame: np.ndarray, px: float = 4.0, **_) -> np.ndarray:
 
 
 @register_fx(
+    fx_id="breathe",
+    category="digital_ptz",
+    latency_tier="light",
+    params={"amp": [0.01, 0.08], "period": [2.0, 12.0]},
+    description="呼吸感缩放：极缓正弦 zoom，amp=幅度，period=周期秒，intro/bridge/outro 首选",
+)
+def apply_breathe(frame: np.ndarray, amp: float = 0.03, period: float = 6.0,
+                  t: float = 0.0, **_) -> np.ndarray:
+    period = max(period, 0.1)
+    scale = 1.0 + amp * math.sin(2 * math.pi * t / period)
+    h, w = frame.shape[:2]
+    M = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), 0, scale)
+    return cv2.warpAffine(frame, M, (w, h), borderMode=cv2.BORDER_REFLECT_101)
+
+
+@register_fx(
+    fx_id="slow_push",
+    category="digital_ptz",
+    latency_tier="light",
+    params={"direction": ["in", "out"], "period": [10.0, 60.0], "amp": [0.05, 0.25]},
+    description="缓慢推进/拉出：半周期内持续单向缩放，period=推进周期秒，桥段前积累张力",
+)
+def apply_slow_push(frame: np.ndarray, direction: str = "in", period: float = 30.0,
+                    amp: float = 0.12, t: float = 0.0, **_) -> np.ndarray:
+    period = max(period, 1.0)
+    t_mod = t % period
+    phase = 0.0 if direction == "in" else math.pi
+    scale = 1.0 + amp * 0.5 * (1.0 - math.cos(2 * math.pi * t_mod / period + phase))
+    h, w = frame.shape[:2]
+    M = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), 0, scale)
+    return cv2.warpAffine(frame, M, (w, h), borderMode=cv2.BORDER_REFLECT_101)
+
+
+_KEN_BURNS_TARGET_MAP = {
+    "lt": (-1, -1), "rt": (1, -1), "lb": (-1, 1), "rb": (1, 1),
+    "l":  (-1,  0), "r":  (1,  0), "t":  (0, -1), "b":  (0,  1),
+}
+
+
+@register_fx(
+    fx_id="ken_burns",
+    category="digital_ptz",
+    latency_tier="light",
+    params={"target": ["lt", "rt", "lb", "rb", "l", "r", "t", "b"],
+            "period": [15.0, 60.0], "zoom": [0.02, 0.15]},
+    description="Ken Burns 运镜：缓慢 pan+zoom 组合，电影纪录片质感，verse/intro 用",
+)
+def apply_ken_burns(frame: np.ndarray, target: str = "rt", period: float = 30.0,
+                    zoom: float = 0.08, t: float = 0.0, **_) -> np.ndarray:
+    period = max(period, 1.0)
+    # 半正弦：0→peak→0，与段落起伏自然契合
+    progress = math.sin(math.pi * (t % period) / period)
+    tx, ty = _KEN_BURNS_TARGET_MAP.get(target, (1, -1))
+    h, w = frame.shape[:2]
+    dx = int(tx * zoom * 0.4 * w * progress)
+    dy = int(ty * zoom * 0.4 * h * progress)
+    scale = 1.0 + zoom * progress
+    M = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), 0, scale)
+    M[0, 2] += dx
+    M[1, 2] += dy
+    return cv2.warpAffine(frame, M, (w, h), borderMode=cv2.BORDER_REFLECT_101)
+
+
+@register_fx(
     fx_id="subject_zoom",
     category="digital_ptz",
     latency_tier="light",

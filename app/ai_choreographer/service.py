@@ -33,6 +33,7 @@ async def orchestrate(
     available_models: Optional[List[str]] = None,
     force_refresh: bool = False,
     model_override: Optional[str] = None,
+    audio_path: Optional[str] = None,
 ) -> Tuple[Optional[ChoreoPlan], List[Dict], str]:
     """
     主编排入口。返回 (plan, track, source)
@@ -59,7 +60,8 @@ async def orchestrate(
     plan_dict = None
     try:
         provider = _get_provider()
-        plan_dict = await provider.complete_json(SYSTEM_PROMPT, user_prompt, schema)
+        plan_dict = await provider.complete_json(SYSTEM_PROMPT, user_prompt, schema,
+                                                 audio_path=audio_path)
     except Exception as e:
         print(f"[AIChoreographer] LLM 调用失败，走 fallback: {e}")
 

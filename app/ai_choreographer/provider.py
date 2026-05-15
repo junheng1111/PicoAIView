@@ -4,16 +4,21 @@ LLM Provider 抽象层：Claude（主选）+ OpenAI / MiniMax（备选）。§5.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 
 class LLMProvider(ABC):
     @abstractmethod
-    async def complete_json(self, system: str, user: str, schema: dict) -> dict:
-        """请求 LLM 返回 JSON 对象，内部解析后返回 dict。"""
+    async def complete_json(self, system: str, user: str, schema: dict,
+                            audio_path: Optional[str] = None) -> dict:
+        """请求 LLM 返回 JSON 对象，内部解析后返回 dict。
+        audio_path: 音频文件路径，支持的 Provider 会将其作为多模态内容发送。
+        """
         ...
 
 
@@ -28,7 +33,8 @@ class ClaudeProvider(LLMProvider):
         key = api_key or os.getenv("ANTHROPIC_API_KEY", "")
         self._client = anthropic.AsyncAnthropic(api_key=key)
 
-    async def complete_json(self, system: str, user: str, schema: dict) -> dict:
+    async def complete_json(self, system: str, user: str, schema: dict,
+                            audio_path: Optional[str] = None) -> dict:
         from tenacity import retry, stop_after_attempt, wait_exponential
 
         @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, max=10))
@@ -64,7 +70,8 @@ class OpenAIProvider(LLMProvider):
         key = api_key or os.getenv("OPENAI_API_KEY", "")
         self._client = openai.AsyncOpenAI(api_key=key)
 
-    async def complete_json(self, system: str, user: str, schema: dict) -> dict:
+    async def complete_json(self, system: str, user: str, schema: dict,
+                            audio_path: Optional[str] = None) -> dict:
         from tenacity import retry, stop_after_attempt, wait_exponential
 
         @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, max=10))
@@ -104,7 +111,8 @@ class MiniMaxProvider(LLMProvider):
         base_url = os.getenv("MINIMAX_API_BASE", self.DEFAULT_API_BASE)
         self._client = openai.AsyncOpenAI(api_key=key, base_url=base_url)
 
-    async def complete_json(self, system: str, user: str, schema: dict) -> dict:
+    async def complete_json(self, system: str, user: str, schema: dict,
+                            audio_path: Optional[str] = None) -> dict:
         from tenacity import retry, stop_after_attempt, wait_exponential
 
         @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, max=10))
@@ -144,12 +152,28 @@ class OpenClawProvider(LLMProvider):
         self._model  = os.getenv("PICOCLAW_LLM_MODEL", self._DEFAULT_MODEL)
         self._client = openai.AsyncOpenAI(api_key=token, base_url=base_url)
 
-    async def complete_json(self, system: str, user: str, schema: dict) -> dict:
+    async def complete_json(self, system: str, user: str, schema: dict,
+                            audio_path: Optional[str] = None) -> dict:
+        user_content: Any = user
+
+        if audio_path and Path(audio_path).exists():
+            audio_bytes = Path(audio_path).read_bytes()
+            b64 = base64.b64encode(audio_bytes).decode()
+            ext = Path(audio_path).suffix.lstrip(".").lower()
+            mime = "audio/mpeg" if ext == "mp3" else f"audio/{ext}"
+            mb = len(audio_bytes) / 1024 / 1024
+            print(f"[OpenClawProvider] 附加音频 {Path(audio_path).name} ({mb:.1f} MB) → {self._model}")
+            # MiniMax-M2.7 multimodal: audio_url content block + text
+            user_content = [
+                {"type": "audio_url", "audio_url": {"url": f"data:{mime};base64,{b64}"}},
+                {"type": "text", "text": user},
+            ]
+
         resp = await self._client.chat.completions.create(
             model=self._model,
             messages=[
                 {"role": "system", "content": system},
-                {"role": "user",   "content": user},
+                {"role": "user",   "content": user_content},
             ],
             response_format={"type": "json_object"},
         )

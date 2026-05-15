@@ -90,18 +90,18 @@ class CameraSource:
         except ImportError:
             return False
 
+        cam = srcampy.Camera()  # 只创建一次，避免重试时 handle 泄漏
         ret = -1
-        for attempt in range(3):
+        for attempt in range(5):
             if not self._running:
                 return False
-            cam = srcampy.Camera()
             ret = cam.open_cam(0, -1, self.fps,
                                [self.width], [self.height],
                                self.height, self.width)
             if ret == 0:
                 break
-            print(f"[Camera] hobot_vio open_cam 尝试 {attempt+1}/3 失败 ret={ret}，等待重试...")
-            time.sleep(3)
+            print(f"[Camera] hobot_vio open_cam 尝试 {attempt+1}/5 失败 ret={ret}，等待重试...")
+            time.sleep(5)   # 给 csi2 驱动更多时间释放
         if ret != 0:
             print(f"[Camera] hobot_vio open_cam 全部失败，改用 OpenCV")
             return False
