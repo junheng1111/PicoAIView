@@ -143,7 +143,7 @@ class OpenClawProvider(LLMProvider):
 
     _DEFAULT_BASE  = "http://localhost:18789/v1"
     _DEFAULT_TOKEN = "gTzTzxaM9OywMEgfXYPEkETJ_TPGIfSk_rfziQR6nWY"
-    _DEFAULT_MODEL = "minimax/MiniMax-M2.7"
+    _DEFAULT_MODEL = "openclaw/default"
 
     def __init__(self):
         import openai
@@ -152,9 +152,28 @@ class OpenClawProvider(LLMProvider):
         self._model  = os.getenv("PICOCLAW_LLM_MODEL", self._DEFAULT_MODEL)
         self._client = openai.AsyncOpenAI(api_key=token, base_url=base_url)
 
+    @staticmethod
+    def _strip_markdown_json(text: str) -> str:
+        """去掉 LLM 有时输出的 ```json ... ``` 包裹，返回纯 JSON 字符串。"""
+        text = text.strip()
+        if text.startswith("```"):
+            # 去掉第一行（```json 或 ```）
+            text = text.split("\n", 1)[-1]
+            # 去掉结尾的 ```
+            if text.endswith("```"):
+                text = text[: text.rfind("```")]
+        return text.strip()
+
     async def complete_json(self, system: str, user: str, schema: dict,
                             audio_path: Optional[str] = None) -> dict:
-        user_content: Any = user
+        # 把 schema 附加到 user prompt，让模型明确知道期望结构
+        schema_hint = (
+            "\n\n## 输出格式（严格遵守，直接输出原始 JSON，不加 markdown 代码块）\n"
+            + json.dumps(schema, ensure_ascii=False, indent=2)
+        )
+        user_with_schema = user + schema_hint
+
+        user_content: Any = user_with_schema
 
         if audio_path and Path(audio_path).exists():
             audio_bytes = Path(audio_path).read_bytes()
@@ -163,10 +182,9 @@ class OpenClawProvider(LLMProvider):
             mime = "audio/mpeg" if ext == "mp3" else f"audio/{ext}"
             mb = len(audio_bytes) / 1024 / 1024
             print(f"[OpenClawProvider] 附加音频 {Path(audio_path).name} ({mb:.1f} MB) → {self._model}")
-            # MiniMax-M2.7 multimodal: audio_url content block + text
             user_content = [
                 {"type": "audio_url", "audio_url": {"url": f"data:{mime};base64,{b64}"}},
-                {"type": "text", "text": user},
+                {"type": "text", "text": user_with_schema},
             ]
 
         resp = await self._client.chat.completions.create(
@@ -177,8 +195,12 @@ class OpenClawProvider(LLMProvider):
             ],
             response_format={"type": "json_object"},
         )
-        content = resp.choices[0].message.content or "{}"
-        return json.loads(content)
+        raw = resp.choices[0].message.content or ""
+        print(f"[OpenClawProvider] 原始响应 {len(raw)} chars, finish={resp.choices[0].finish_reason}")
+        if not raw.strip():
+            raise ValueError("OpenClaw 返回空内容")
+        clean = self._strip_markdown_json(raw)
+        return json.loads(clean)
 
 
 def make_provider() -> LLMProvider:

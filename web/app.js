@@ -13,6 +13,7 @@ document.addEventListener('DOMContentLoaded', () => {
     checkSystemStatus();
     loadMusicLibrary();
     loadThemeCatalog();
+    loadFxCatalog();
     setInterval(checkSystemStatus, 5000);
 
     const audio = document.getElementById('audioPlayer');
@@ -505,6 +506,152 @@ function connectWebSocket() {
 function setWsDot(connected) {
     document.getElementById('wsIndicator').className = 'ws-dot ' + (connected ? 'connected' : 'disconnected');
     document.getElementById('wsLabel').textContent   = connected ? 'WS 已连接' : 'WS 未连接';
+}
+
+// ── FX 测试区 ───────────────────────────────────────────────────────
+let _fxTestActive = {};   // fx_id → intensity
+
+const _FX_CATEGORY_LABEL = {
+    overlay:       '覆层特效',
+    color:         '颜色调校',
+    shader_glitch: '故障特效',
+    shader_pixel:  '画质特效',
+    digital_ptz:   '运镜',
+    time:          '时间域',
+    geometry:      '几何变形',
+    ai_aware:      'AI感知',
+    stylization:   '艺术风格',
+    theme:         '主题调色',
+};
+
+async function loadFxCatalog() {
+    try {
+        const data = await fetchJSON('/api/fx/catalog');
+        const sel  = document.getElementById('fxTestSelect');
+        sel.innerHTML = '<option value="">── 选择特效 ──</option>';
+
+        // 按 category 分组
+        const groups = {};
+        for (const fx of (data.catalog || [])) {
+            if (!groups[fx.category]) groups[fx.category] = [];
+            groups[fx.category].push(fx);
+        }
+
+        const catOrder = ['overlay','color','shader_glitch','shader_pixel',
+                          'digital_ptz','time','geometry','ai_aware','stylization','theme'];
+        for (const cat of catOrder) {
+            if (!groups[cat]) continue;
+            const grp = document.createElement('optgroup');
+            grp.label = _FX_CATEGORY_LABEL[cat] || cat;
+            for (const fx of groups[cat]) {
+                const desc = fx.description ? fx.description.slice(0, 28) : '';
+                grp.appendChild(new Option(`${fx.id}  ${desc}`, fx.id));
+            }
+            sel.appendChild(grp);
+        }
+    } catch (e) {
+        console.warn('loadFxCatalog:', e);
+    }
+}
+
+async function fxTestToggle() {
+    const fxId = document.getElementById('fxTestSelect').value;
+    if (!fxId) return;
+    const intensity = parseInt(document.getElementById('fxTestIntensity').value, 10) / 100;
+
+    if (_fxTestActive[fxId] !== undefined) {
+        // 已激活 → 关闭
+        await fxTestRemove(fxId);
+    } else {
+        // 未激活 → 开启
+        try {
+            await fetchJSON('/api/session/fx_test', 'POST', { fx_id: fxId, intensity });
+            _fxTestActive[fxId] = intensity;
+            renderFxChips();
+        } catch (e) {
+            console.warn('fx_test on:', e);
+        }
+    }
+}
+
+async function fxTestRemove(fxId) {
+    try {
+        await fetch(`/api/session/fx_test/${encodeURIComponent(fxId)}`,
+                    { method: 'DELETE' });
+        delete _fxTestActive[fxId];
+        renderFxChips();
+    } catch (e) {
+        console.warn('fx_test off:', e);
+    }
+}
+
+async function fxTestClearAll() {
+    try {
+        await fetchJSON('/api/session/fx_test/clear', 'POST');
+        _fxTestActive = {};
+        renderFxChips();
+    } catch (e) {
+        console.warn('fx_test clear:', e);
+    }
+}
+
+function renderFxChips() {
+    const container = document.getElementById('fxTestActive');
+    container.innerHTML = '';
+
+    // 更新激活按钮文字
+    const fxId = document.getElementById('fxTestSelect').value;
+    const btn   = container.previousElementSibling;   // 激活按钮
+    if (fxId && _fxTestActive[fxId] !== undefined) {
+        btn.textContent = '⏹ 关闭';
+        btn.className   = 'btn w-full';
+    } else {
+        btn.textContent = '▶ 激活';
+        btn.className   = 'btn btn-accent w-full';
+    }
+
+    for (const [id, intens] of Object.entries(_fxTestActive)) {
+        const chip = document.createElement('div');
+        chip.className = 'fx-chip';
+        chip.innerHTML = `<span>${id}</span>
+            <span class="chip-intensity">${Math.round(intens * 100)}%</span>
+            <button class="chip-remove" onclick="fxTestRemove('${id}')">✕</button>`;
+        container.appendChild(chip);
+    }
+}
+
+// ── 常驻效果控制 ────────────────────────────────────────────────────
+let _liveFxDebounce = null;
+
+function onLiveFxSlider(slider, valId) {
+    document.getElementById(valId).textContent = slider.value + '%';
+    scheduleLiveFxUpdate();
+}
+
+function onLiveFxToggle() {
+    scheduleLiveFxUpdate();
+}
+
+function scheduleLiveFxUpdate() {
+    clearTimeout(_liveFxDebounce);
+    _liveFxDebounce = setTimeout(pushLiveFxConfig, 80);
+}
+
+async function pushLiveFxConfig() {
+    const get = id => document.getElementById(id);
+    const body = {
+        subject_zoom:     get('lfSubjectZoom').checked,
+        subject_zoom_amp: parseInt(get('lfSubjectZoomAmp').value, 10) / 100,
+        zoom_pulse:       get('lfZoomPulse').checked,
+        zoom_pulse_amp:   parseInt(get('lfZoomPulseAmp').value, 10) / 100,
+        brightness:       get('lfBrightness').checked,
+        brightness_amp:   parseInt(get('lfBrightnessAmp').value, 10) / 100,
+    };
+    try {
+        await fetchJSON('/api/session/live_fx', 'POST', body);
+    } catch (e) {
+        console.warn('live_fx update failed:', e);
+    }
 }
 
 // ── 工具函数 ────────────────────────────────────────────────────────

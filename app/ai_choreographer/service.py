@@ -57,11 +57,13 @@ async def orchestrate(
     user_prompt = build_user_prompt(feat, catalog, style)
     schema = CHOREO_PLAN_SCHEMA
 
+    provider = _get_provider()
+    print(f"[AIChoreographer] 调用 LLM provider={provider.__class__.__name__} style={style!r} audio={audio_path}")
     plan_dict = None
     try:
-        provider = _get_provider()
         plan_dict = await provider.complete_json(SYSTEM_PROMPT, user_prompt, schema,
                                                  audio_path=audio_path)
+        print(f"[AIChoreographer] LLM 返回成功，segments={len(plan_dict.get('segments', []))}")
     except Exception as e:
         print(f"[AIChoreographer] LLM 调用失败，走 fallback: {e}")
 
@@ -71,10 +73,15 @@ async def orchestrate(
             plan = ChoreoPlan.model_validate(plan_dict)
             track = expand_plan_to_track(plan, feat)
             choreo_cache.set_plan(music_id, style, model_name, plan_dict)
+            print(f"[AIChoreographer] ✓ AI 编排完成 source=ai track_len={len(track)}")
             return plan, track, "ai"
         except Exception as e:
             print(f"[AIChoreographer] Plan 校验失败: {e}")
+            print(f"[AIChoreographer] 原始 plan_dict keys: {list(plan_dict.keys()) if plan_dict else 'None'}")
+            segs = plan_dict.get('segments') if plan_dict else None
+            print(f"[AIChoreographer] segments type={type(segs).__name__} sample={str(segs)[:300] if segs else 'None'}")
 
     # Fallback：规则版
+    print(f"[AIChoreographer] ⚠ 使用规则 fallback source=rule")
     track = build_choreo_rulebased(feat)
     return None, track, "rule"

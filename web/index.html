@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PicoClaw 实时编排系统</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="/static/style.css?v=6">
+    <link rel="stylesheet" href="/static/style.css?v=8">
 </head>
 <body>
     <div class="app-layout">
@@ -88,6 +88,63 @@
                 <button class="btn btn-secondary w-full" onclick="reset()">
                     🔄 重置
                 </button>
+            </section>
+
+            <!-- FX 测试区 -->
+            <section class="card">
+                <h3>FX 测试区
+                    <button class="btn-icon" onclick="fxTestClearAll()" title="清除全部">✕ 全部</button>
+                </h3>
+                <select id="fxTestSelect" class="select-input" onchange="renderFxChips()"></select>
+                <div class="theme-strength-row" style="display:flex;align-items:center;gap:6px;margin:6px 0;">
+                    <label class="hint" style="white-space:nowrap">强度</label>
+                    <input type="range" id="fxTestIntensity" min="0" max="100" value="80"
+                           oninput="document.getElementById('fxTestIntensityVal').textContent=this.value+'%'"
+                           style="flex:1">
+                    <span class="hint" id="fxTestIntensityVal">80%</span>
+                </div>
+                <button class="btn btn-accent w-full" onclick="fxTestToggle()">▶ 激活</button>
+                <div id="fxTestActive" class="fx-chip-list"></div>
+            </section>
+
+            <!-- 常驻基础效果 -->
+            <section class="card">
+                <h3>常驻效果</h3>
+                <div class="live-fx-list">
+                    <div class="live-fx-row">
+                        <label class="live-fx-label">
+                            <input type="checkbox" id="lfSubjectZoom" checked
+                                   onchange="onLiveFxToggle()">
+                            主体跟焦
+                        </label>
+                        <input type="range" id="lfSubjectZoomAmp" min="0" max="200" value="100"
+                               oninput="onLiveFxSlider(this, 'lfSubjectZoomAmpVal')"
+                               class="live-fx-slider">
+                        <span class="live-fx-val" id="lfSubjectZoomAmpVal">100%</span>
+                    </div>
+                    <div class="live-fx-row">
+                        <label class="live-fx-label">
+                            <input type="checkbox" id="lfZoomPulse" checked
+                                   onchange="onLiveFxToggle()">
+                            节拍缩放
+                        </label>
+                        <input type="range" id="lfZoomPulseAmp" min="0" max="200" value="100"
+                               oninput="onLiveFxSlider(this, 'lfZoomPulseAmpVal')"
+                               class="live-fx-slider">
+                        <span class="live-fx-val" id="lfZoomPulseAmpVal">100%</span>
+                    </div>
+                    <div class="live-fx-row">
+                        <label class="live-fx-label">
+                            <input type="checkbox" id="lfBrightness" checked
+                                   onchange="onLiveFxToggle()">
+                            呼吸亮度
+                        </label>
+                        <input type="range" id="lfBrightnessAmp" min="0" max="200" value="100"
+                               oninput="onLiveFxSlider(this, 'lfBrightnessAmpVal')"
+                               class="live-fx-slider">
+                        <span class="live-fx-val" id="lfBrightnessAmpVal">100%</span>
+                    </div>
+                </div>
             </section>
 
             <!-- 主题滤镜 -->
@@ -179,7 +236,7 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=6"></script>
+    <script src="/static/app.js?v=8"></script>
 </body>
 </html>
 

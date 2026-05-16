@@ -281,6 +281,78 @@ body {
 ::-webkit-scrollbar-thumb { background: #333355; border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: #667eea; }
 
+/* ── FX 激活 chip 列表 ── */
+.fx-chip-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin-top: 8px;
+    min-height: 4px;
+}
+.fx-chip {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 8px 3px 10px;
+    background: #2d1f4a;
+    border: 1px solid #7240a8;
+    border-radius: 20px;
+    font-size: 11px;
+    color: #c4a0ff;
+    cursor: default;
+}
+.fx-chip .chip-intensity {
+    color: #888;
+    font-size: 10px;
+}
+.fx-chip .chip-remove {
+    background: none;
+    border: none;
+    color: #7240a8;
+    cursor: pointer;
+    font-size: 12px;
+    padding: 0 0 0 2px;
+    line-height: 1;
+}
+.fx-chip .chip-remove:hover { color: #ff6b6b; }
+
+/* ── 常驻效果控制 ── */
+.live-fx-list { display: flex; flex-direction: column; gap: 8px; }
+
+.live-fx-row {
+    display: grid;
+    grid-template-columns: 90px 1fr 36px;
+    align-items: center;
+    gap: 6px;
+}
+.live-fx-label {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    color: #bbb;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.live-fx-label input[type="checkbox"] {
+    accent-color: #667eea;
+    width: 13px;
+    height: 13px;
+    cursor: pointer;
+}
+.live-fx-slider {
+    width: 100%;
+    height: 3px;
+    accent-color: #667eea;
+    cursor: pointer;
+}
+.live-fx-val {
+    font-size: 10px;
+    color: #666;
+    text-align: right;
+    min-width: 32px;
+}
+
 /* ── 编排列表 ── */
 .choreo-list { display: flex; flex-direction: column; gap: 6px; }
 

@@ -22,6 +22,13 @@ SYSTEM_PROMPT = """\
    - 不能在相邻两段都使用同一模型；连续使用同一重型模型不超过 60 秒。
 7. 排除清单中的 fx（标 excluded=true）不能出现在 plan 中。
 
+【常驻基础效果（始终生效，勿重复添加到 fx 列表）】
+以下三个效果由系统自动执行，不受 choreo 控制，你的编排无需也不应再添加它们：
+  subject_zoom     — 检测到人时自动放大并跟随主体（强度随 RMS）
+  zoom_pulse       — 每个节拍触发 0.1s 缩放脉冲（强度随 RMS）
+  brightness_curve — 亮度随 RMS 实时呼吸（0.85~1.15 倍）
+这三个是所有编排的基底，你负责在此之上叠加主题、覆层、glitch 等。
+
 【调色主题（theme）】
 每首曲目有一个全曲默认主题（ChoreoPlan.theme），每个段落可通过 SegmentPlan.theme 单独覆盖。
 主题只能从以下列表选择，留空 "" 表示无主题：

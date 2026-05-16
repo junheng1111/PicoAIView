@@ -56,6 +56,16 @@ class FxCompositor:
         self._active_theme: str = ""
         self._theme_params: Dict[str, Any] = {}
 
+        # 常驻实时层配置（可通过 set_live_config 覆盖）
+        self._live_config: Dict[str, Any] = {
+            "subject_zoom":     True,
+            "subject_zoom_amp": 1.0,   # 0.0 = 关闭，1.0 = 默认强度
+            "zoom_pulse":       True,
+            "zoom_pulse_amp":   1.0,
+            "brightness":       True,
+            "brightness_amp":   1.0,
+        }
+
     def load_track(self, track: List[Dict[str, Any]]) -> None:
         """加载 ChoreoTrack，分类为 beat events 和 continuous fx。"""
         self._beat_events = []
@@ -73,6 +83,13 @@ class FxCompositor:
     def set_vision_state(self, vs) -> None:
         self._vision_state = vs
 
+    def set_live_config(self, updates: Dict[str, Any]) -> None:
+        """更新常驻实时层参数，只更新传入的 key。"""
+        self._live_config.update(updates)
+
+    def get_live_config(self) -> Dict[str, Any]:
+        return dict(self._live_config)
+
     def set_theme(self, theme_id: str, params: Optional[Dict[str, Any]] = None) -> None:
         """设置持续背景主题滤镜。theme_id='' 清除主题。"""
         self._active_theme = theme_id or ""
@@ -87,6 +104,12 @@ class FxCompositor:
 
     def clear_override(self, fx_id: str) -> None:
         self._manual_overrides.pop(fx_id, None)
+
+    def clear_all_overrides(self) -> None:
+        self._manual_overrides.clear()
+
+    def get_overrides(self) -> Dict[str, Any]:
+        return dict(self._manual_overrides)
 
     def process(self, frame: np.ndarray, audio_clock: float) -> np.ndarray:
         """
@@ -189,43 +212,41 @@ class FxCompositor:
         - pan：轻微横向漂移（慢节奏感）
         不依赖 ChoreoTrack，始终生效。
         """
-        rms = self.current_rms
+        cfg    = self._live_config
+        rms    = self.current_rms
         result = frame
 
-        # a) subject_zoom：有人时把人放大，并记录视口供 bbox 坐标变换
-        if vs and vs.subject_count > 0:
-            zoom_amp = 0.05 + rms * 0.20   # 0.05 ~ 0.25 倍放大
-            # 计算 subject_zoom 视口（归一化）
-            ratio = 0.7  # 与 apply_subject_zoom 默认值一致
-            pb = vs.primary_bbox()
-            if pb:
-                cx = pb[0] + pb[2] / 2.0
-                cy = pb[1] + pb[3] / 2.0
-            else:
-                cx, cy = 0.5, 0.5
-            vl = max(0.0, cx - ratio / 2.0)
-            vt = max(0.0, cy - ratio / 2.0)
-            # 右/下边界超出时从左/上收缩（与 apply_subject_zoom 的 clamp 行为一致）
-            vl = min(vl, 1.0 - ratio)
-            vt = min(vt, 1.0 - ratio)
-            self._viewport = (vl, vt, ratio, ratio)
-            result = apply_fx("subject_zoom", result, vision_state=vs,
-                               t=audio_clock, amp=zoom_amp)
+        # a) subject_zoom
+        if cfg.get("subject_zoom", True) and cfg.get("subject_zoom_amp", 1.0) > 0:
+            if vs and vs.subject_count > 0:
+                base_amp = 0.05 + rms * 0.20
+                zoom_amp = base_amp * cfg["subject_zoom_amp"]
+                ratio = 0.7
+                pb = vs.primary_bbox()
+                cx = (pb[0] + pb[2] / 2.0) if pb else 0.5
+                cy = (pb[1] + pb[3] / 2.0) if pb else 0.5
+                vl = min(max(0.0, cx - ratio / 2.0), 1.0 - ratio)
+                vt = min(max(0.0, cy - ratio / 2.0), 1.0 - ratio)
+                self._viewport = (vl, vt, ratio, ratio)
+                result = apply_fx("subject_zoom", result, vision_state=vs,
+                                  t=audio_clock, amp=zoom_amp)
 
-        # b) zoom_pulse：节拍触发后 0.1s 内做脉冲缩放
-        pulse_age = audio_clock - self._last_beat_t
-        if 0.0 <= pulse_age < self._beat_pulse_dur:
-            # 脉冲强度：RMS 越高越强，高能节拍最大放大 15%
-            pulse_strength = (1.0 - pulse_age / self._beat_pulse_dur)
-            pulse_amp = rms * 0.15 * pulse_strength
-            if pulse_amp > 0.01:
-                result = apply_fx("zoom_pulse", result, vision_state=vs,
-                                   t=audio_clock, amp=pulse_amp)
+        # b) zoom_pulse
+        if cfg.get("zoom_pulse", True) and cfg.get("zoom_pulse_amp", 1.0) > 0:
+            pulse_age = audio_clock - self._last_beat_t
+            if 0.0 <= pulse_age < self._beat_pulse_dur:
+                pulse_strength = (1.0 - pulse_age / self._beat_pulse_dur)
+                pulse_amp = rms * 0.15 * pulse_strength * cfg["zoom_pulse_amp"]
+                if pulse_amp > 0.01:
+                    result = apply_fx("zoom_pulse", result, vision_state=vs,
+                                      t=audio_clock, amp=pulse_amp)
 
-        # c) brightness_curve：随 RMS 微调（让画面"跳动"呼吸）
-        brightness_k = 0.85 + rms * 0.30   # 0.85 ~ 1.15
-        if abs(brightness_k - 1.0) > 0.02:
-            result = apply_fx("brightness_curve", result, vision_state=vs,
-                               t=audio_clock, k=brightness_k)
+        # c) brightness_curve
+        if cfg.get("brightness", True) and cfg.get("brightness_amp", 1.0) > 0:
+            dev = rms * 0.30 * cfg["brightness_amp"]   # 偏离 1.0 的幅度
+            brightness_k = 1.0 + (dev - 0.15)          # 等效 0.85~1.15 at amp=1
+            if abs(brightness_k - 1.0) > 0.02:
+                result = apply_fx("brightness_curve", result, vision_state=vs,
+                                  t=audio_clock, k=brightness_k)
 
         return result

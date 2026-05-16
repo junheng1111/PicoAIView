@@ -494,6 +494,44 @@ async def set_session_theme(req: ThemeSetRequest):
     return {"ok": False, "reason": "compositor not ready"}
 
 
+class LiveFxRequest(BaseModel):
+    subject_zoom:     Optional[bool]  = None
+    subject_zoom_amp: Optional[float] = None   # 0.0~2.0，1.0=默认
+    zoom_pulse:       Optional[bool]  = None
+    zoom_pulse_amp:   Optional[float] = None
+    brightness:       Optional[bool]  = None
+    brightness_amp:   Optional[float] = None
+
+
+@router.post("/session/live_fx")
+async def set_live_fx(req: LiveFxRequest):
+    """实时调整常驻基础层（zoom_pulse / brightness / subject_zoom）。"""
+    from app.main import get_orchestrator
+    orch = get_orchestrator()
+    if not (orch and orch.compositor):
+        return {"ok": False, "reason": "compositor not ready"}
+
+    updates: Dict[str, Any] = {}
+    for field in ("subject_zoom", "subject_zoom_amp",
+                  "zoom_pulse", "zoom_pulse_amp",
+                  "brightness", "brightness_amp"):
+        val = getattr(req, field)
+        if val is not None:
+            updates[field] = val
+    orch.compositor.set_live_config(updates)
+    return {"ok": True, "live_config": orch.compositor.get_live_config()}
+
+
+@router.get("/session/live_fx")
+async def get_live_fx():
+    """读取当前常驻层配置。"""
+    from app.main import get_orchestrator
+    orch = get_orchestrator()
+    if orch and orch.compositor:
+        return {"ok": True, "live_config": orch.compositor.get_live_config()}
+    return {"ok": False}
+
+
 @router.get("/fx/themes")
 async def list_themes():
     """返回所有 category='theme' 的 FX 列表。"""
@@ -503,6 +541,64 @@ async def list_themes():
         if meta.category == "theme"
     ]
     return {"themes": themes}
+
+
+@router.get("/fx/catalog")
+async def get_fx_catalog():
+    """返回完整 FX 目录（供前端 FX 测试区使用）。"""
+    from app.fx._registry import build_fx_catalog
+    return {"catalog": build_fx_catalog(include_excluded=False)}
+
+
+# ── FX 测试覆盖（手动叠加，不依赖 choreo）────────────────────────────
+
+class FxTestRequest(BaseModel):
+    fx_id:     str
+    intensity: float = 0.8    # 0.0~1.0，映射到 intensity/amp/strength
+
+
+@router.post("/session/fx_test")
+async def fx_test_on(req: FxTestRequest):
+    """激活单个 FX 覆盖（立刻在实时画面中叠加，不需要 session）。"""
+    from app.main import get_orchestrator
+    orch = get_orchestrator()
+    if not (orch and orch.compositor):
+        return {"ok": False, "reason": "compositor not ready"}
+    v = float(max(0.0, min(1.0, req.intensity)))
+    orch.compositor.override_fx(req.fx_id, {
+        "intensity": v, "amp": v, "strength": v,
+    })
+    return {"ok": True, "fx_id": req.fx_id, "intensity": v}
+
+
+@router.delete("/session/fx_test/{fx_id}")
+async def fx_test_off(fx_id: str):
+    """关闭单个 FX 覆盖。"""
+    from app.main import get_orchestrator
+    orch = get_orchestrator()
+    if orch and orch.compositor:
+        orch.compositor.clear_override(fx_id)
+    return {"ok": True}
+
+
+@router.post("/session/fx_test/clear")
+async def fx_test_clear():
+    """清除全部 FX 测试覆盖。"""
+    from app.main import get_orchestrator
+    orch = get_orchestrator()
+    if orch and orch.compositor:
+        orch.compositor.clear_all_overrides()
+    return {"ok": True}
+
+
+@router.get("/session/fx_test")
+async def fx_test_list():
+    """获取当前所有激活的覆盖 FX。"""
+    from app.main import get_orchestrator
+    orch = get_orchestrator()
+    if orch and orch.compositor:
+        return {"ok": True, "overrides": orch.compositor.get_overrides()}
+    return {"ok": False, "overrides": {}}
 
 
 # ---------------------------------------------------------------------------
