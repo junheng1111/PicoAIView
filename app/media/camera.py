@@ -27,11 +27,13 @@ class CameraSource:
     """
 
     def __init__(self, width: int = 1280, height: int = 720,
-                 fps: int = 30, device: int = 0):
+                 fps: int = 30, device: int = 0,
+                 backend: str = "auto"):
         self.width = width
         self.height = height
         self.fps = fps
         self.device = device
+        self._force_backend = backend  # "auto" | "usb" | "mipi"
 
         self._latest: Optional[np.ndarray] = None
         self._lock = threading.Lock()
@@ -65,13 +67,14 @@ class CameraSource:
     def _run(self) -> None:
         """后台线程：持续尝试打开真实摄像头，失败时用合成帧填充，成功后切换到真实帧。"""
         while self._running:
-            if self._try_hobot():
+            # 强制 USB 模式跳过 hobot_vio（MIPI CSI）
+            if self._force_backend != "usb" and self._try_hobot():
                 # hobot_vio 循环结束（相机断开），回到外层继续重试
                 print("[Camera] hobot_vio 循环退出，5s 后重试...")
                 self._backend = "reconnecting"
                 time.sleep(5)
                 continue
-            # hobot_vio 不可用，尝试 OpenCV
+            # hobot_vio 不可用或已禁用，尝试 OpenCV（USB）
             if self._try_opencv():
                 print("[Camera] OpenCV 循环退出，5s 后重试...")
                 self._backend = "reconnecting"

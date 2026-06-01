@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>地面感知 — PicoClaw</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden;
+      background: #000; color: #e2e8f0; font-family: system-ui, sans-serif; }
+    canvas { display: block; }
+    #header {
+      position: fixed; top: 0; left: 0; right: 0; height: 52px;
+      display: flex; align-items: center; gap: 14px; padding: 0 20px;
+      background: rgba(2,4,8,0.85); backdrop-filter: blur(12px);
+      border-bottom: 1px solid rgba(0,200,255,0.1); z-index: 100;
+    }
+    #back-btn {
+      background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.15);
+      color: #e2e8f0; padding: 5px 14px; border-radius: 6px; cursor: pointer; font-size: 13px;
+    }
+    #back-btn:hover { background: rgba(255,255,255,0.14); }
+    #title { font-weight: 600; font-size: 15px; letter-spacing: 0.02em; }
+    #stats {
+      margin-left: auto; display: flex; align-items: center; gap: 18px; font-size: 12px;
+      color: rgba(226,232,240,0.5);
+    }
+    .stat-item { display: flex; align-items: center; gap: 6px; }
+    .stat-val { color: #00d4ff; font-variant-numeric: tabular-nums; font-weight: 600; }
+    #ws-dot { width: 8px; height: 8px; border-radius: 50%; background: #ef4444;
+      transition: background 0.3s; }
+    #ws-dot.on { background: #22c55e; animation: dot-pulse 2s infinite; }
+    @keyframes dot-pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+    #scene-container { position: fixed; top: 52px; left: 0; right: 0; bottom: 0; }
+    #hint {
+      position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%);
+      font-size: 11px; color: rgba(226,232,240,0.2); pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="header">
+    <button id="back-btn" onclick="window.close()||history.back()">← 返回</button>
+    <span id="title">🌐 地面感知 — PicoClaw</span>
+    <div id="stats">
+      <div class="stat-item"><span id="ws-dot"></span><span id="ws-label">WS</span></div>
+      <div class="stat-item">检测到人数：<span class="stat-val" id="person-count">0</span></div>
+      <div class="stat-item">亮灯格：<span class="stat-val" id="tile-count">0</span></div>
+    </div>
+  </div>
+  <div id="scene-container"></div>
+  <div id="hint">拖拽旋转 · 滚轮缩放 · 右键平移</div>
+
+  <script type="module">
+    import * as THREE from 'https://esm.sh/three@0.175.0';
+    import { OrbitControls } from 'https://esm.sh/three@0.175.0/examples/jsm/controls/OrbitControls.js';
+
+    // ── 参数 ──────────────────────────────────────────────────────
+    const COLS = 8, ROWS = 5;
+    const T = 1.7, GAP = 0.18, STEP = T + GAP;
+    const FW = COLS * STEP, FD = ROWS * STEP;
+    const CX = FW / 2, CZ = FD / 2;
+
+    // ── 渲染器 ───────────────────────────────────────────────────
+    const container = document.getElementById('scene-container');
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(container.clientWidth, container.clientHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.5;
+    container.appendChild(renderer.domElement);
+
+    // ── 场景 ─────────────────────────────────────────────────────
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x010306);
+    scene.fog = new THREE.FogExp2(0x010306, 0.045);
+
+    // ── 相机 ─────────────────────────────────────────────────────
+    const camera = new THREE.PerspectiveCamera(48, container.clientWidth / container.clientHeight, 0.1, 200);
+    camera.position.set(CX + 4, 13, FD + 9);
+    camera.lookAt(CX, 0, CZ);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.set(CX, 0, CZ);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.06;
+    controls.minDistance = 5;
+    controls.maxDistance = 60;
+    controls.maxPolarAngle = Math.PI * 0.48;
+    controls.update();
+
+    // ── 灯光 ─────────────────────────────────────────────────────
+    scene.add(new THREE.AmbientLight(0x081828, 1.2));
+    const sunLight = new THREE.DirectionalLight(0x80d0ff, 0.4);
+    sunLight.position.set(CX, 20, -5);
+    scene.add(sunLight);
+
+    // ── 地板基板 ─────────────────────────────────────────────────
+    const baseGeo = new THREE.BoxGeometry(FW + 2, 0.08, FD + 2);
+    const baseMat = new THREE.MeshStandardMaterial({
+      color: 0x030912, roughness: 0.9, metalness: 0.1,
+    });
+    const base = new THREE.Mesh(baseGeo, baseMat);
+    base.position.set(CX, -0.16, CZ);
+    base.receiveShadow = true;
+    scene.add(base);
+
+    // 细格线
+    const grid = new THREE.GridHelper(Math.max(FW, FD) + 4, 20, 0x0a1830, 0x060f20);
+    grid.position.set(CX, -0.11, CZ);
+    scene.add(grid);
+
+    // ── 格子模块 ─────────────────────────────────────────────────
+    const COLORS = [
+      { h: 0.55, s: 1, l: 0.55 },  // 青蓝
+      { h: 0.75, s: 1, l: 0.55 },  // 紫
+      { h: 0.15, s: 1, l: 0.55 },  // 橙
+      { h: 0.33, s: 1, l: 0.55 },  // 绿
+    ];
+    const tiles = [];          // tiles[row][col]
+    const tileLights = [];     // 每格的 PointLight
+
+    for (let r = 0; r < ROWS; r++) {
+      tiles.push([]);
+      tileLights.push([]);
+      for (let c = 0; c < COLS; c++) {
+        // 格子本体
+        const geo = new THREE.BoxGeometry(T, 0.1, T);
+        const mat = new THREE.MeshStandardMaterial({
+          color: 0x060e1a, roughness: 0.4, metalness: 0.6,
+          emissive: new THREE.Color(0, 0, 0),
+          emissiveIntensity: 0,
+        });
+        const tile = new THREE.Mesh(geo, mat);
+        tile.position.set(c * STEP + T / 2, 0, r * STEP + T / 2);
+        tile.receiveShadow = true;
+        tile.castShadow = false;
+        tile.userData = { intensity: 0, target: 0, colorIdx: 0 };
+        scene.add(tile);
+        tiles[r].push(tile);
+
+        // 细边框（发光线条感）
+        const edgeGeo = new THREE.EdgesGeometry(geo);
+        const edgeMat = new THREE.LineBasicMaterial({ color: 0x0a2040, transparent: true, opacity: 0.6 });
+        const edges = new THREE.LineSegments(edgeGeo, edgeMat);
+        tile.add(edges);
+        tile.userData.edgeMat = edgeMat;
+
+        // 格子专属点光源（关闭状态）
+        const pl = new THREE.PointLight(0x00d4ff, 0, STEP * 1.8, 2);
+        pl.position.set(c * STEP + T / 2, 1.5, r * STEP + T / 2);
+        scene.add(pl);
+        tileLights[r].push(pl);
+      }
+    }
+
+    // ── 人物标记（圆柱 + 发光环） ───────────────────────────────
+    const MAX_PERSONS = 8;
+    const markers = [];
+    for (let i = 0; i < MAX_PERSONS; i++) {
+      const grp = new THREE.Group();
+      // 发光球
+      const sphereMat = new THREE.MeshStandardMaterial({
+        color: 0x00ffff, emissive: new THREE.Color(0, 1, 1), emissiveIntensity: 2,
+        roughness: 0.1, metalness: 0,
+      });
+      const sphere = new THREE.Mesh(new THREE.SphereGeometry(0.18, 16, 16), sphereMat);
+      sphere.position.y = 2.2;
+      grp.add(sphere);
+      // 垂直光柱
+      const beamMat = new THREE.MeshStandardMaterial({
+        color: 0x00ccff, emissive: new THREE.Color(0, 0.8, 1), emissiveIntensity: 1.5,
+        transparent: true, opacity: 0.35,
+      });
+      const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 2.2, 8), beamMat);
+      beam.position.y = 1.1;
+      grp.add(beam);
+      // 底圆环
+      const ringMat = new THREE.MeshStandardMaterial({
+        color: 0x00ffff, emissive: new THREE.Color(0, 1, 1), emissiveIntensity: 3,
+        transparent: true, opacity: 0.6,
+      });
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(0.45, 0.04, 8, 32), ringMat);
+      ring.rotation.x = Math.PI / 2;
+      ring.position.y = 0.1;
+      grp.add(ring);
+
+      grp.visible = false;
+      grp.userData = { scaleT: 0, sphereMat, beamMat, ringMat };
+      scene.add(grp);
+      markers.push(grp);
+    }
+
+    // ── RDK X5 开发板模型 ────────────────────────────────────────
+    const boardGrp = new THREE.Group();
+    // PCB 主体
+    const pcbMat = new THREE.MeshStandardMaterial({ color: 0x0d2b0d, roughness: 0.5, metalness: 0.3 });
+    const pcb = new THREE.Mesh(new THREE.BoxGeometry(5, 0.28, 7.5), pcbMat);
+    boardGrp.add(pcb);
+    // 主芯片
+    const chipMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.2, metalness: 0.8 });
+    const chip = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.18, 1.8), chipMat);
+    chip.position.set(0, 0.23, 0);
+    boardGrp.add(chip);
+    // 摄像头模块（底面朝下）
+    const camMat = new THREE.MeshStandardMaterial({ color: 0x060606, roughness: 0.1, metalness: 0.9 });
+    const camModule = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.5, 1.2), camMat);
+    camModule.position.set(0, -0.39, 3.0);
+    boardGrp.add(camModule);
+    // 摄像头镜头（发光点）
+    const lensMat = new THREE.MeshStandardMaterial({
+      color: 0x001133, emissive: new THREE.Color(0, 0.3, 0.8), emissiveIntensity: 1.5,
+    });
+    const lens = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 0.08, 24), lensMat);
+    lens.rotation.x = Math.PI / 2;
+    lens.position.set(0, -0.63, 3.0);
+    boardGrp.add(lens);
+    // 电源 LED
+    const ledMat = new THREE.MeshStandardMaterial({
+      color: 0xff2200, emissive: new THREE.Color(1, 0.1, 0), emissiveIntensity: 4,
+    });
+    const led = new THREE.Mesh(new THREE.SphereGeometry(0.1, 8, 8), ledMat);
+    led.position.set(-2.0, 0.2, -3.0);
+    boardGrp.add(led);
+    // 状态 LED（蓝色）
+    const ledBMat = new THREE.MeshStandardMaterial({
+      color: 0x00aaff, emissive: new THREE.Color(0, 0.6, 1), emissiveIntensity: 3,
+    });
+    const ledB = new THREE.Mesh(new THREE.SphereGeometry(0.1, 8, 8), ledBMat);
+    ledB.position.set(-1.5, 0.2, -3.0);
+    boardGrp.add(ledB);
+
+    // 板子位置：居中 + 抬高
+    boardGrp.position.set(CX, 9.5, -2.5);
+    boardGrp.rotation.x = 0.45;   // 稍微朝下倾斜（摄像头视角）
+    scene.add(boardGrp);
+
+    // ── FOV 锥形线 ──────────────────────────────────────────────
+    const camWorldPos = new THREE.Vector3(CX, 9.5 - 0.63 * Math.sin(0.45), -2.5 + 3.0 * Math.cos(0.45));
+    const fovMat = new THREE.LineBasicMaterial({ color: 0x00aaff, transparent: true, opacity: 0.18 });
+    const fovCorners = [
+      new THREE.Vector3(0,      0.05, 0),
+      new THREE.Vector3(FW,     0.05, 0),
+      new THREE.Vector3(FW,     0.05, FD),
+      new THREE.Vector3(0,      0.05, FD),
+    ];
+    for (const corner of fovCorners) {
+      const pts = [camWorldPos.clone(), corner];
+      const line = new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints(pts),
+        fovMat
+      );
+      scene.add(line);
+    }
+    // FOV 底框
+    const framePts = [...fovCorners, fovCorners[0]];
+    scene.add(new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(framePts),
+      new THREE.LineBasicMaterial({ color: 0x00ccff, transparent: true, opacity: 0.25 })
+    ));
+
+    // ── 调整大小 ─────────────────────────────────────────────────
+    window.addEventListener('resize', () => {
+      const w = container.clientWidth, h = container.clientHeight;
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h);
+    });
+
+    // ── WebSocket ────────────────────────────────────────────────
+    const wsDot = document.getElementById('ws-dot');
+    const wsLabel = document.getElementById('ws-label');
+    const personCountEl = document.getElementById('person-count');
+    const tileCountEl = document.getElementById('tile-count');
+    let personPositions = [];  // [{cx, cy, colorIdx}]
+
+    function openWs() {
+      const ws = new WebSocket(`ws://${location.host}/ws/control`);
+      ws.onopen = () => { wsDot.className = 'on'; wsLabel.textContent = '已连接'; };
+      ws.onclose = () => { wsDot.className = ''; wsLabel.textContent = 'WS'; setTimeout(openWs, 3000); };
+      ws.onmessage = (ev) => {
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch { return; }
+        if (msg.type !== 'vision') return;
+
+        const dets = (msg.detections || []).filter(d => d.label === 'person');
+        personCountEl.textContent = dets.length;
+
+        personPositions = dets.map((d, i) => ({
+          cx: d.bbox[0] + d.bbox[2] / 2,
+          cy: d.bbox[1] + d.bbox[3] / 2,
+          colorIdx: i % COLORS.length,
+        }));
+
+        // 更新格子目标亮度 + 颜色
+        for (let r = 0; r < ROWS; r++)
+          for (let c = 0; c < COLS; c++) {
+            tiles[r][c].userData.target = 0;
+            tiles[r][c].userData.colorIdx = 0;
+          }
+
+        for (const p of personPositions) {
+          const col = Math.min(COLS - 1, Math.max(0, Math.floor(p.cx * COLS)));
+          const row = Math.min(ROWS - 1, Math.max(0, Math.floor(p.cy * ROWS)));
+          // 主格 + 相邻格（根据 bbox 宽度扩散）
+          const spreadCol = dets[personPositions.indexOf(p)] ?
+            Math.ceil(dets[personPositions.indexOf(p)].bbox[2] * COLS / 2) : 0;
+          for (let dr = -1; dr <= 1; dr++) {
+            for (let dc = -spreadCol; dc <= spreadCol; dc++) {
+              const rr = row + dr, cc = col + dc;
+              if (rr >= 0 && rr < ROWS && cc >= 0 && cc < COLS) {
+                const dist = Math.sqrt(dr * dr + dc * dc);
+                const strength = Math.max(0, 1 - dist * 0.45);
+                if (strength > tiles[rr][cc].userData.target) {
+                  tiles[rr][cc].userData.target = strength;
+                  tiles[rr][cc].userData.colorIdx = p.colorIdx;
+                }
+              }
+            }
+          }
+        }
+      };
+    }
+    openWs();
+
+    // ── 动画循环 ─────────────────────────────────────────────────
+    let ledPhase = 0;
+    let activeTileCount = 0;
+
+    (function animate(ts = 0) {
+      requestAnimationFrame(animate);
+      controls.update();
+
+      ledPhase += 0.03;
+      // 蓝 LED 呼吸
+      ledBMat.emissiveIntensity = 2 + Math.sin(ledPhase) * 1.5;
+
+      // 格子动画
+      activeTileCount = 0;
+      for (let r = 0; r < ROWS; r++) {
+        for (let c = 0; c < COLS; c++) {
+          const ud = tiles[r][c].userData;
+          ud.intensity += (ud.target - ud.intensity) * 0.12;
+          const v = ud.intensity;
+          const col = COLORS[ud.colorIdx];
+          const mat = tiles[r][c].material;
+
+          if (v > 0.01) {
+            activeTileCount++;
+            mat.color.setHSL(col.h, col.s, 0.04 + v * 0.14);
+            mat.emissive.setHSL(col.h, col.s, v * col.l);
+            mat.emissiveIntensity = v * 2.5;
+            ud.edgeMat.color.setHSL(col.h, 1, 0.5 + v * 0.4);
+            ud.edgeMat.opacity = 0.4 + v * 0.55;
+            tileLights[r][c].color.setHSL(col.h, 1, 0.8);
+            tileLights[r][c].intensity = v * 2.2;
+          } else {
+            mat.color.setHex(0x060e1a);
+            mat.emissive.set(0, 0, 0);
+            mat.emissiveIntensity = 0;
+            ud.edgeMat.color.setHex(0x0a2040);
+            ud.edgeMat.opacity = 0.3;
+            tileLights[r][c].intensity = 0;
+          }
+        }
+      }
+      tileCountEl.textContent = activeTileCount;
+
+      // 人物标记动画
+      for (let i = 0; i < MAX_PERSONS; i++) {
+        const grp = markers[i];
+        const hasP = i < personPositions.length;
+        if (hasP) {
+          const p = personPositions[i];
+          const wx = p.cx * FW;
+          const wz = p.cy * FD;
+          grp.position.set(wx, 0, wz);
+          grp.visible = true;
+          const col = COLORS[p.colorIdx];
+          const c = new THREE.Color().setHSL(col.h, 1, 0.7);
+          grp.userData.sphereMat.emissive.copy(c);
+          grp.userData.beamMat.color.copy(c);
+          grp.userData.ringMat.emissive.copy(c);
+          // 发光环脉冲
+          const ring = grp.children[2];
+          ring.scale.setScalar(1 + 0.12 * Math.sin(ledPhase * 2 + i));
+        } else {
+          grp.visible = false;
+        }
+      }
+
+      renderer.render(scene, camera);
+    })();
+  </script>
+</body>
+</html>

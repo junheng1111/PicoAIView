@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>机械臂模型 — PicoClaw</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden;
+      background: #0d0d1a; color: #e2e8f0; font-family: system-ui, sans-serif; }
+    canvas { display: block; }
+
+    /* ── Header ── */
+    #header {
+      position: fixed; top: 0; left: 0; right: 0; height: 52px;
+      display: flex; align-items: center; gap: 14px; padding: 0 20px;
+      background: rgba(13,13,26,0.9); backdrop-filter: blur(10px);
+      border-bottom: 1px solid rgba(255,255,255,0.08); z-index: 100;
+    }
+    #back-btn {
+      background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15);
+      color: #e2e8f0; padding: 5px 14px; border-radius: 6px; cursor: pointer;
+      font-size: 13px; transition: background 0.15s;
+    }
+    #back-btn:hover { background: rgba(255,255,255,0.18); }
+    #header-title { font-weight: 600; font-size: 15px; }
+    #conn-badge {
+      font-size: 11px; padding: 2px 10px; border-radius: 20px;
+      background: rgba(239,68,68,0.2); color: #f87171;
+      border: 1px solid rgba(239,68,68,0.35); transition: all 0.3s;
+    }
+    #conn-badge.connected {
+      background: rgba(34,197,94,0.2); color: #4ade80;
+      border-color: rgba(34,197,94,0.35);
+    }
+    #header-hint { font-size: 12px; color: rgba(226,232,240,0.3); margin-left: auto; }
+
+    /* ── 3D Scene ── */
+    #scene-container { position: fixed; top: 52px; left: 0; right: 0; bottom: 0; }
+
+    /* ── Loading ── */
+    #loading {
+      position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+      display: flex; flex-direction: column; align-items: center; gap: 16px;
+    }
+    .spinner {
+      width: 44px; height: 44px;
+      border: 3px solid rgba(139,92,246,0.2); border-top-color: #8b5cf6;
+      border-radius: 50%; animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #loading p { margin: 0; font-size: 14px; color: rgba(226,232,240,0.5); }
+
+    /* ── Bottom Toolbar ── */
+    #toolbar {
+      position: fixed; bottom: 24px; left: 0; right: 0;
+      display: flex; justify-content: center; gap: 10px; z-index: 100;
+    }
+    .glass-btn {
+      position: relative; display: inline-flex; align-items: center; justify-content: center;
+      gap: 6px; padding: 9px 18px;
+      color: #fff; font-size: 13px; font-weight: 500;
+      background: rgba(255,255,255,0.12);
+      border: 1px solid rgba(255,255,255,0.35);
+      border-radius: 10px; cursor: pointer;
+      backdrop-filter: blur(8px);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.5), 0 4px 12px rgba(0,0,0,0.3);
+      transition: background 0.2s, box-shadow 0.2s;
+      user-select: none;
+    }
+    .glass-btn:hover { background: rgba(255,255,255,0.22); }
+    .glass-btn.active { background: rgba(255,255,255,0.32); box-shadow: inset 0 2px 4px rgba(0,0,0,0.3); }
+    .glass-btn.connect-btn { min-width: 150px; }
+    .glass-btn.connect-btn.connecting { opacity: 0.7; pointer-events: none; }
+    .glass-btn.connect-btn.connected { border-color: rgba(74,222,128,0.5); }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #f87171; }
+    .dot.on { background: #4ade80; animation: pulse-dot 2s infinite; }
+    @keyframes pulse-dot { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+    /* ── Joint Control Panel ── */
+    #joint-panel {
+      position: fixed; right: 20px; bottom: 80px;
+      width: 310px; max-height: 75vh; overflow-y: auto;
+      background: rgba(20,20,40,0.92); backdrop-filter: blur(16px);
+      border: 1px solid rgba(255,255,255,0.12); border-radius: 12px;
+      padding: 16px; z-index: 200;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+      display: none;
+    }
+    #joint-panel.visible { display: block; }
+    #panel-header {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 14px; padding-bottom: 10px;
+      border-bottom: 1px solid rgba(255,255,255,0.1);
+      cursor: move; user-select: none;
+    }
+    #panel-header h3 { margin: 0; font-size: 14px; font-weight: 600; }
+    #panel-close {
+      background: none; border: none; color: rgba(226,232,240,0.6);
+      font-size: 18px; cursor: pointer; padding: 0 4px; line-height: 1;
+    }
+    #panel-close:hover { color: #fff; }
+
+    /* Joint rows */
+    .joint-row {
+      display: grid; grid-template-columns: 90px 48px 1fr; align-items: center;
+      gap: 8px; margin-bottom: 10px;
+    }
+    .joint-name { font-size: 12px; color: rgba(226,232,240,0.8); }
+    .joint-deg { font-size: 12px; text-align: right; color: #a78bfa; font-variant-numeric: tabular-nums; }
+    .joint-control { display: flex; align-items: center; gap: 4px; }
+    .key-btn {
+      width: 24px; height: 24px; border: none; border-radius: 4px;
+      background: rgba(255,255,255,0.1); color: #e2e8f0;
+      font-size: 10px; font-weight: 700; text-transform: uppercase;
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
+      transition: background 0.1s; user-select: none; flex-shrink: 0;
+    }
+    .key-btn:hover { background: rgba(255,255,255,0.2); }
+    .key-btn.pressed { background: #3b82f6; }
+    .key-btn.dec { clip-path: polygon(0 50%, 30% 0, 100% 0, 100% 100%, 30% 100%); }
+    .key-btn.inc { clip-path: polygon(100% 50%, 70% 0, 0 0, 0 100%, 70% 100%); }
+    .joint-slider {
+      flex: 1; -webkit-appearance: none; appearance: none;
+      height: 4px; background: rgba(255,255,255,0.15); border-radius: 2px; outline: none; cursor: pointer;
+    }
+    .joint-slider::-webkit-slider-thumb {
+      -webkit-appearance: none; width: 12px; height: 12px;
+      border-radius: 50%; background: #8b5cf6; cursor: pointer;
+    }
+    .joint-slider::-moz-range-thumb {
+      width: 12px; height: 12px; border-radius: 50%; background: #8b5cf6; cursor: pointer; border: none;
+    }
+
+    /* Connect button inside panel */
+    #panel-connect-btn {
+      margin-top: 14px; padding-top: 12px;
+      border-top: 1px solid rgba(255,255,255,0.08);
+      display: flex; gap: 8px;
+    }
+    #panel-connect-btn button {
+      flex: 1; padding: 7px 12px; border-radius: 7px; font-size: 13px;
+      font-weight: 500; cursor: pointer; border: none; transition: background 0.2s;
+    }
+    #btn-connect { background: #3b82f6; color: #fff; }
+    #btn-connect:hover { background: #2563eb; }
+    #btn-connect.connected { background: #ef4444; }
+    #btn-connect.connected:hover { background: #dc2626; }
+    #btn-connect:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    #hint {
+      position: fixed; bottom: 6px; left: 50%; transform: translateX(-50%);
+      font-size: 10px; color: rgba(226,232,240,0.2); pointer-events: none; white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+  <div id="header">
+    <button id="back-btn" onclick="window.close() || history.back()">← 返回</button>
+    <span id="header-title">🤖 SO-ARM100 机械臂</span>
+    <span id="conn-badge">未连接</span>
+    <span id="header-hint">拖拽旋转 · 滚轮缩放</span>
+  </div>
+
+  <div id="scene-container">
+    <div id="loading">
+      <div class="spinner"></div>
+      <p id="loading-text">加载模型中…</p>
+    </div>
+  </div>
+
+  <!-- Keyboard Control Panel -->
+  <div id="joint-panel">
+    <div id="panel-header">
+      <h3>关节控制</h3>
+      <button id="panel-close">×</button>
+    </div>
+    <div id="joints-table"><!-- rows injected by JS --></div>
+    <div id="panel-connect-btn">
+      <button id="btn-connect">连接机械臂</button>
+    </div>
+  </div>
+
+  <!-- Bottom Toolbar -->
+  <div id="toolbar">
+    <button class="glass-btn connect-btn" id="toolbar-connect-btn" onclick="toggleConnect()">
+      <span class="dot" id="toolbar-dot"></span>
+      <span id="toolbar-connect-label">连接机械臂</span>
+    </button>
+    <button class="glass-btn" id="toolbar-keyboard-btn" onclick="togglePanel()">
+      ⌨ 关节控制
+    </button>
+    <button class="glass-btn" id="toolbar-director-btn" onclick="toggleDirector()" disabled
+            style="opacity:0.5;cursor:not-allowed">
+      🎬 自动运镜联动
+    </button>
+  </div>
+
+  <div id="hint">基于 bambot 开源 URDF · Web Serial API 连接实体臂</div>
+
+  <script type="module">
+    import * as THREE from 'https://esm.sh/three@0.175.0';
+    import { OrbitControls } from 'https://esm.sh/three@0.175.0/examples/jsm/controls/OrbitControls.js';
+    import { STLLoader } from 'https://esm.sh/three@0.175.0/examples/jsm/loaders/STLLoader.js';
+    import URDFLoader from 'https://esm.sh/urdf-loader@0.12.4?deps=three@0.175.0';
+    // ── Robot Config ──────────────────────────────────────────────
+    const JOINT_CONFIG = [
+      { name: 'Rotation',    servoId: 1, initDeg: 180, incKey: '1', decKey: 'q' },
+      { name: 'Pitch',       servoId: 2, initDeg: 180, incKey: '2', decKey: 'w' },
+      { name: 'Elbow',       servoId: 3, initDeg: 180, incKey: '3', decKey: 'e' },
+      { name: 'Wrist_Pitch', servoId: 4, initDeg: 180, incKey: '4', decKey: 'r' },
+      { name: 'Wrist_Roll',  servoId: 5, initDeg: 180, incKey: '5', decKey: 't' },
+      { name: 'Jaw',         servoId: 6, initDeg: 180, incKey: '6', decKey: 'y' },
+    ];
+
+    // ── State ────────────────────────────────────────────────────
+    const jointDegrees = {};
+    const jointLimits = {};
+    JOINT_CONFIG.forEach(j => {
+      jointDegrees[j.name] = j.initDeg;
+      jointLimits[j.name] = { lower: 0, upper: 360 };
+    });
+
+    let robotUrdf = null;
+    let isConnected = false;
+    let isConnecting = false;
+    let directorOn = false;
+
+    // ── WebSocket to backend ──────────────────────────────────────
+    const WS_URL = `ws://${location.host}/ws/arm`;
+    let ws = null;
+    let wsReady = false;
+
+    function openWs() {
+      ws = new WebSocket(WS_URL);
+      ws.onopen = () => { wsReady = true; };
+      ws.onclose = () => { wsReady = false; setTimeout(openWs, 3000); };
+      ws.onerror = () => { wsReady = false; };
+      ws.onmessage = (ev) => {
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch { return; }
+        handleWsMsg(msg);
+      };
+    }
+
+    function handleWsMsg(msg) {
+      if (msg.type === 'connected') {
+        isConnected = true;
+        isConnecting = false;
+        // Sync joint angles from real robot
+        if (msg.joints) {
+          JOINT_CONFIG.forEach(jc => {
+            const v = msg.joints[String(jc.servoId)];
+            if (v != null) jointDegrees[jc.name] = v;
+          });
+          applyJointStatesToUrdf();
+          refreshJointUI();
+        }
+        setConnectUI('connected');
+      } else if (msg.type === 'disconnected') {
+        isConnected = false;
+        isConnecting = false;
+        setConnectUI('disconnected');
+      } else if (msg.type === 'degrees') {
+        if (msg.joints) {
+          JOINT_CONFIG.forEach(jc => {
+            const v = msg.joints[String(jc.servoId)];
+            if (v != null) jointDegrees[jc.name] = v;
+          });
+          applyJointStatesToUrdf();
+          refreshJointUI();
+        }
+      } else if (msg.type === 'error') {
+        isConnecting = false;
+        if (isConnected) { /* keep connected */ } else { setConnectUI('disconnected'); }
+        console.error('[arm]', msg.message);
+        if (msg.message && !isConnected) alert('操作失败: ' + msg.message);
+      } else if (msg.type === 'director') {
+        setDirectorUI(!!msg.enabled);
+      } else if (msg.type === 'status') {
+        if (msg.connected) { isConnected = true; setConnectUI('connected'); }
+        if (msg.director_enabled != null) setDirectorUI(!!msg.director_enabled);
+      }
+    }
+
+    function wsSend(obj) {
+      if (ws && wsReady) ws.send(JSON.stringify(obj));
+    }
+
+    openWs();
+
+    const pressedKeys = new Set();
+    const KEY_STEP = 0.15;
+    const KEY_INTERVAL_MS = 3;
+    let keyIntervalId = null;
+
+    // ── Utils ─────────────────────────────────────────────────────
+    const degreesToRadians = d => d * Math.PI / 180;
+    const radiansToDegrees = r => r * 180 / Math.PI;
+
+    // ── Three.js Setup ────────────────────────────────────────────
+    const container = document.getElementById('scene-container');
+    const loadingEl = document.getElementById('loading');
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0d0d1a);
+
+    const camera = new THREE.PerspectiveCamera(12, container.clientWidth / container.clientHeight, 0.01, 1000);
+    camera.position.set(-30, 10, 30);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(container.clientWidth, container.clientHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    container.appendChild(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.set(1, 2, 0);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+    controls.minDistance = 5;
+    controls.maxDistance = 200;
+    controls.update();
+
+    scene.add(new THREE.AmbientLight(0xffffff, 0.4));
+    const d1 = new THREE.DirectionalLight(0xffffff, 1);
+    d1.position.set(2, 20, 5); d1.castShadow = true; scene.add(d1);
+    const d2 = new THREE.DirectionalLight(0xffffff, 1);
+    d2.position.set(-2, 20, -5); scene.add(d2);
+
+    const ground = new THREE.Mesh(
+      new THREE.PlaneGeometry(100, 100),
+      new THREE.MeshStandardMaterial({ color: 0x1a1a2e, roughness: 0.9 })
+    );
+    ground.rotation.x = -Math.PI / 2;
+    ground.receiveShadow = true;
+    scene.add(ground);
+    scene.add(new THREE.GridHelper(30, 30, 0x2a2a4e, 0x1e1e3a));
+
+    // ── URDF Load ─────────────────────────────────────────────────
+    const manager = new THREE.LoadingManager();
+    const urdfLoader = new URDFLoader(manager);
+
+    urdfLoader.loadMeshCb = (path, mgr, done) => {
+      const ext = path.split('.').pop().toLowerCase();
+      if (ext === 'stl') {
+        new STLLoader(mgr).load(
+          path,
+          (geo) => {
+            geo.computeVertexNormals();
+            const mesh = new THREE.Mesh(
+              geo,
+              new THREE.MeshPhongMaterial({ color: 0x7c4dff, specular: 0x444466, shininess: 40 })
+            );
+            mesh.castShadow = true;
+            done(mesh);
+          },
+          undefined,
+          () => done(new THREE.Object3D())
+        );
+      } else {
+        done(new THREE.Object3D());
+      }
+    };
+
+    urdfLoader.load(
+      '/URDFs/so101.urdf',
+      (robot) => {
+        robot.rotateOnAxis(new THREE.Vector3(1, 0, 0), Math.PI / -2);
+        robot.traverse(c => { c.castShadow = true; });
+        robot.updateMatrixWorld(true);
+        robot.scale.set(15, 15, 15);
+        scene.add(robot);
+        robotUrdf = robot;
+
+        // Extract joint limits from URDF
+        JOINT_CONFIG.forEach(jc => {
+          const joint = robot.joints[jc.name];
+          if (joint && joint.limit) {
+            const lo = joint.limit.lower != null ? radiansToDegrees(joint.limit.lower) : 0;
+            const hi = joint.limit.upper != null ? radiansToDegrees(joint.limit.upper) : 360;
+            jointLimits[jc.name] = { lower: Math.round(lo), upper: Math.round(hi) };
+          }
+        });
+
+        // Apply init angles
+        applyJointStatesToUrdf();
+        buildJointPanel();
+        loadingEl.style.display = 'none';
+      },
+      undefined,
+      (err) => {
+        console.error('URDF error', err);
+        document.getElementById('loading-text').textContent = '模型加载失败';
+        document.getElementById('loading-text').style.color = '#f87171';
+      }
+    );
+
+    // ── Apply joint states to 3D model ────────────────────────────
+    function applyJointStatesToUrdf() {
+      if (!robotUrdf) return;
+      JOINT_CONFIG.forEach(jc => {
+        const joint = robotUrdf.joints[jc.name];
+        if (joint) joint.setJointValue(degreesToRadians(jointDegrees[jc.name]));
+      });
+    }
+
+    // ── Update joint degrees (UI + 3D + robot) ────────────────────
+    function setJointDegrees(updates) {
+      // updates: [{name, value}, ...]
+      updates.forEach(({ name, value }) => {
+        const lim = jointLimits[name];
+        jointDegrees[name] = Math.max(lim.lower, Math.min(lim.upper, value));
+      });
+      applyJointStatesToUrdf();
+      refreshJointUI();
+
+      if (isConnected) {
+        const joints = {};
+        updates.forEach(({ name }) => {
+          const jc = JOINT_CONFIG.find(j => j.name === name);
+          if (jc) joints[String(jc.servoId)] = jointDegrees[name];
+        });
+        wsSend({ cmd: 'set_degrees', joints });
+      }
+    }
+
+    // ── Keyboard Control ──────────────────────────────────────────
+    document.addEventListener('keydown', e => {
+      pressedKeys.add(e.key);
+      if (keyIntervalId === null) startKeyInterval();
+    });
+    document.addEventListener('keyup', e => {
+      pressedKeys.delete(e.key);
+      if (pressedKeys.size === 0 && keyIntervalId !== null) {
+        clearInterval(keyIntervalId); keyIntervalId = null;
+      }
+      // reflect released state in buttons
+      JOINT_CONFIG.forEach(jc => {
+        const decBtn = document.getElementById(`dec-${jc.name}`);
+        const incBtn = document.getElementById(`inc-${jc.name}`);
+        if (decBtn) decBtn.classList.toggle('pressed', pressedKeys.has(jc.decKey));
+        if (incBtn) incBtn.classList.toggle('pressed', pressedKeys.has(jc.incKey));
+      });
+    });
+
+    function startKeyInterval() {
+      keyIntervalId = setInterval(() => {
+        if (pressedKeys.size === 0) return;
+        const updates = [];
+        JOINT_CONFIG.forEach(jc => {
+          let deg = typeof jointDegrees[jc.name] === 'number' ? jointDegrees[jc.name] : 180;
+          let changed = false;
+          if (pressedKeys.has(jc.decKey)) { deg -= KEY_STEP; changed = true; }
+          if (pressedKeys.has(jc.incKey)) { deg += KEY_STEP; changed = true; }
+          if (changed) updates.push({ name: jc.name, value: deg });
+
+          // highlight buttons
+          const decBtn = document.getElementById(`dec-${jc.name}`);
+          const incBtn = document.getElementById(`inc-${jc.name}`);
+          if (decBtn) decBtn.classList.toggle('pressed', pressedKeys.has(jc.decKey));
+          if (incBtn) incBtn.classList.toggle('pressed', pressedKeys.has(jc.incKey));
+        });
+        if (updates.length > 0) setJointDegrees(updates);
+      }, KEY_INTERVAL_MS);
+    }
+
+    // ── Robot Connection (via backend WebSocket) ──────────────────
+    window.toggleConnect = function () {
+      if (isConnecting) return;
+      if (isConnected) {
+        isConnecting = true;
+        setConnectUI('connecting');
+        wsSend({ cmd: 'disconnect' });
+      } else {
+        isConnecting = true;
+        setConnectUI('connecting');
+        wsSend({ cmd: 'connect' });
+      }
+    };
+
+    function setConnectUI(state) {
+      const badge = document.getElementById('conn-badge');
+      const dot = document.getElementById('toolbar-dot');
+      const label = document.getElementById('toolbar-connect-label');
+      const toolbarBtn = document.getElementById('toolbar-connect-btn');
+      const panelBtn = document.getElementById('btn-connect');
+      const dirBtn = document.getElementById('toolbar-director-btn');
+
+      if (state === 'connected') {
+        badge.textContent = '已连接'; badge.className = 'connected';
+        dot.className = 'dot on'; label.textContent = '断开连接';
+        toolbarBtn.classList.remove('connecting'); toolbarBtn.classList.add('connected');
+        if (panelBtn) { panelBtn.textContent = '断开连接'; panelBtn.className = 'connected'; panelBtn.disabled = false; }
+        if (dirBtn) { dirBtn.disabled = false; dirBtn.style.opacity = '1'; dirBtn.style.cursor = 'pointer'; }
+      } else if (state === 'connecting') {
+        badge.textContent = '连接中…'; badge.className = '';
+        label.textContent = '连接中…'; toolbarBtn.classList.add('connecting');
+        if (panelBtn) { panelBtn.textContent = '连接中…'; panelBtn.disabled = true; }
+      } else {
+        badge.textContent = '未连接'; badge.className = '';
+        dot.className = 'dot'; label.textContent = '连接机械臂';
+        toolbarBtn.classList.remove('connected', 'connecting');
+        if (panelBtn) { panelBtn.textContent = '连接机械臂'; panelBtn.className = ''; panelBtn.disabled = false; }
+        // 断开后联动按钮置灰并复位
+        setDirectorUI(false);
+        if (dirBtn) { dirBtn.disabled = true; dirBtn.style.opacity = '0.5'; dirBtn.style.cursor = 'not-allowed'; }
+      }
+    }
+
+    // ── Director (auto camera-work linkage) ───────────────────────
+    window.toggleDirector = function () {
+      if (!isConnected) return;
+      wsSend({ cmd: 'set_director', enabled: !directorOn });
+    };
+
+    function setDirectorUI(on) {
+      directorOn = on;
+      const dirBtn = document.getElementById('toolbar-director-btn');
+      if (dirBtn) dirBtn.classList.toggle('active', on);
+      // 联动开启时托管手动控件
+      const panel = document.getElementById('joint-panel');
+      if (panel) panel.classList.toggle('director-managed', on);
+      document.querySelectorAll('.joint-slider, .key-btn').forEach(el => {
+        el.style.pointerEvents = on ? 'none' : '';
+        el.style.opacity = on ? '0.4' : '';
+      });
+      const panelBtn = document.getElementById('btn-connect');
+      // 联动开启时禁止在面板里断开（先关联动），避免误操作
+      if (panelBtn) panelBtn.disabled = on;
+      let hint = document.getElementById('director-hint');
+      if (on && !hint) {
+        hint = document.createElement('div');
+        hint.id = 'director-hint';
+        hint.textContent = '🎬 联动中，手动控制已托管';
+        hint.style.cssText = 'font-size:11px;color:#4ade80;text-align:center;margin-top:8px;';
+        document.getElementById('joints-table')?.appendChild(hint);
+      } else if (!on && hint) {
+        hint.remove();
+      }
+    }
+
+    // ── Panel UI ──────────────────────────────────────────────────
+    window.togglePanel = function () {
+      const panel = document.getElementById('joint-panel');
+      const btn = document.getElementById('toolbar-keyboard-btn');
+      const visible = panel.classList.toggle('visible');
+      btn.classList.toggle('active', visible);
+    };
+
+    document.getElementById('panel-close').addEventListener('click', () => {
+      document.getElementById('joint-panel').classList.remove('visible');
+      document.getElementById('toolbar-keyboard-btn').classList.remove('active');
+    });
+
+    document.getElementById('btn-connect').addEventListener('click', toggleConnect);
+
+    function buildJointPanel() {
+      const table = document.getElementById('joints-table');
+      table.innerHTML = '';
+      JOINT_CONFIG.forEach(jc => {
+        const lim = jointLimits[jc.name];
+        const row = document.createElement('div');
+        row.className = 'joint-row';
+        row.innerHTML = `
+          <span class="joint-name">${jc.name}</span>
+          <span class="joint-deg" id="deg-${jc.name}">${jointDegrees[jc.name].toFixed(1)}°</span>
+          <div class="joint-control">
+            <button class="key-btn dec" id="dec-${jc.name}">${jc.decKey}</button>
+            <input type="range" class="joint-slider" id="slider-${jc.name}"
+              min="${lim.lower}" max="${lim.upper}" step="0.1"
+              value="${jointDegrees[jc.name]}">
+            <button class="key-btn inc" id="inc-${jc.name}">${jc.incKey}</button>
+          </div>
+        `;
+        table.appendChild(row);
+
+        // Slider change
+        const slider = row.querySelector(`#slider-${jc.name}`);
+        slider.addEventListener('input', () => {
+          setJointDegrees([{ name: jc.name, value: parseFloat(slider.value) }]);
+        });
+
+        // Touch/mouse on key buttons
+        const decBtn = row.querySelector(`#dec-${jc.name}`);
+        const incBtn = row.querySelector(`#inc-${jc.name}`);
+        const addKeyButtonHandlers = (btn, key) => {
+          const press = () => { pressedKeys.add(key); if (keyIntervalId === null) startKeyInterval(); };
+          const release = () => { pressedKeys.delete(key); };
+          btn.addEventListener('mousedown', press);
+          btn.addEventListener('mouseup', release);
+          btn.addEventListener('mouseleave', release);
+          btn.addEventListener('touchstart', e => { e.preventDefault(); press(); }, { passive: false });
+          btn.addEventListener('touchend', release);
+        };
+        addKeyButtonHandlers(decBtn, jc.decKey);
+        addKeyButtonHandlers(incBtn, jc.incKey);
+      });
+    }
+
+    function refreshJointUI() {
+      JOINT_CONFIG.forEach(jc => {
+        const deg = jointDegrees[jc.name];
+        const degEl = document.getElementById(`deg-${jc.name}`);
+        const slider = document.getElementById(`slider-${jc.name}`);
+        if (degEl) degEl.textContent = typeof deg === 'number' ? `${deg.toFixed(1)}°` : '--';
+        if (slider && typeof deg === 'number') slider.value = deg;
+      });
+    }
+
+    // ── Panel Drag ────────────────────────────────────────────────
+    const panel = document.getElementById('joint-panel');
+    const panelHeader = document.getElementById('panel-header');
+    let dragging = false, dx0 = 0, dy0 = 0, px0 = 0, py0 = 0;
+
+    panelHeader.addEventListener('mousedown', e => {
+      if (e.target.id === 'panel-close') return;
+      dragging = true;
+      const r = panel.getBoundingClientRect();
+      dx0 = e.clientX; dy0 = e.clientY; px0 = r.left; py0 = r.top;
+      panel.style.right = 'unset';
+      panel.style.bottom = 'unset';
+      panel.style.left = px0 + 'px';
+      panel.style.top = py0 + 'px';
+    });
+    document.addEventListener('mousemove', e => {
+      if (!dragging) return;
+      panel.style.left = (px0 + e.clientX - dx0) + 'px';
+      panel.style.top = (py0 + e.clientY - dy0) + 'px';
+    });
+    document.addEventListener('mouseup', () => { dragging = false; });
+
+    // ── Resize ────────────────────────────────────────────────────
+    window.addEventListener('resize', () => {
+      camera.aspect = container.clientWidth / container.clientHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(container.clientWidth, container.clientHeight);
+    });
+
+    // ── Animation Loop ────────────────────────────────────────────
+    (function animate() {
+      requestAnimationFrame(animate);
+      controls.update();
+      renderer.render(scene, camera);
+    })();
+  </script>
+</body>
+</html>

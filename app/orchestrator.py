@@ -247,6 +247,19 @@ class Orchestrator:
         elapsed = time.monotonic() - self._audio_clock_ts
         return self._audio_clock + elapsed + self._clock_drift
 
+    def current_active_fx(self) -> str:
+        """当前激活的 FX 名（取最近一个 beat event）。供 status 推送与机械臂导演复用。"""
+        if not (self._session_running and self.compositor):
+            return ""
+        t = self.current_audio_clock()
+        bt = self.compositor._beat_times
+        if not bt:
+            return ""
+        idx = bisect.bisect_right(bt, t) - 1
+        if 0 <= idx < len(self.compositor._beat_events):
+            return self.compositor._beat_events[idx].get("fx", "")
+        return ""
+
     # ------------------------------------------------------------------
     # EventBus
     # ------------------------------------------------------------------
@@ -294,15 +307,7 @@ class Orchestrator:
                     "subjects": vs.subject_count if vs else 0,
                 }
                 # 当前激活的 FX 名（取最近一个 beat event）
-                active_fx = ""
-                if self._session_running and self.compositor:
-                    t = self.current_audio_clock()
-                    bt = self.compositor._beat_times
-                    if bt:
-                        import bisect as _bisect
-                        idx = _bisect.bisect_right(bt, t) - 1
-                        if 0 <= idx < len(self.compositor._beat_events):
-                            active_fx = self.compositor._beat_events[idx].get("fx", "")
+                active_fx = self.current_active_fx()
                 await broadcast_status(fps, 0.0, self.current_audio_clock(),
                                        bpu_stats, active_fx,
                                        self.compositor._active_theme if self.compositor else "")

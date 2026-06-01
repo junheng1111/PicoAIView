@@ -9,6 +9,7 @@ cd "$(dirname "$0")"
 bash "$(dirname "$0")/kill.sh"
 
 PYTHON=/root/pico_view/venv/bin/python
+export PICOCLAW_CAM_BACKEND=usb   # usb | mipi | auto
 
 if [ "${1:-}" = "--fg" ]; then
     echo "[open.sh] 前台启动（Ctrl+C 停止）..."

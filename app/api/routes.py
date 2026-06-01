@@ -462,12 +462,16 @@ async def session_start(req: SessionStartRequest):
 @router.post("/session/stop")
 async def session_stop():
     from app.main import get_orchestrator
+    from app.api.arm_director import director as arm_director
     orch = get_orchestrator()
     if orch:
         orch.stop_session()
         if orch.compositor:
             orch.compositor.set_theme("")   # 清除主题
     _active_session.clear()
+    # 停止预览同步关闭机械臂联动并归位
+    if arm_director.enabled:
+        await arm_director.set_enabled(False)
     return {"ok": True}
 
 
